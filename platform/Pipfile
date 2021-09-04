@@ -1,0 +1,39 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+django = {version = "==3.2.*"}
+psycopg2-binary = {version = "==2.9.*"}
+gunicorn = {version = "==20.1.*"}
+strawberry-graphql = {version = "==0.127.*", extras = ['debug-server']}
+strawberry-graphql-django = {version = "==0.4.*"}
+requests = {version = "==2.27.*"}
+bson = {version = "==0.5.*"}
+jsonschema = {version = "==4.4.*", extras = ["format"]}
+pillow = {version = "==9.0.*"}
+python-memcached = {version = "==1.*"}
+pika = {version = "==1.2.*"}
+jsonref = {version = "==0.*"}
+promise = {version = "==2.3.*"}
+celery = {version = "==5.2.4"}
+django-celery-beat = {version = "==2.2.*"}
+elasticsearch-dsl = {version = "==7.4.*"}
+notifiers = {version = "==1.3.*"}
+django-inlinecss = "==0.3.*"
+channels = {version = "==3.0.*"}
+channels-redis= {version = "==3.3.*"}
+stripe = {version = "==2.75.*"}
+django-json-widget = "==1.1.1"
+"cryptlex.lexfloatclient" = "==4.7.1"
+
+[dev-packages]
+coverage = {version = "==6.3.*"}
+freezegun = "==1.2.1"
+django-stubs = "==1.11.0"
+mypy = "==0.950"
+flake8 = "==5.0.4"
+
+[requires]
+python_version = "3.8"

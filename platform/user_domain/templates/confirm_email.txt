@@ -1,0 +1,16 @@
+{% load i18n %}
+{% autoescape off %}
+Dear {{username}},
+
+Please click the link below to confirm your email:
+{{confirm_email_url}}
+
+If the link is not displayed correctly, please copy the URL and paste it into your browser.
+
+{% if team_name %}
+Best regards,
+{{ team_name }}
+https://{{ company_domain }}
+{% endif %}
+
+{% endautoescape %}

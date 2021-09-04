@@ -1,0 +1,16 @@
+{
+   "retail_analytics": {
+      "attributes": {
+         "title": "",
+         "timeFieldName": "time_start",
+         "fields": "[]"
+      }
+   },
+   "advertising_analytics": {
+      "attributes": {
+         "title": "",
+         "timeFieldName": "time_start",
+         "fields": "[{\"count\":0,\"script\":\"return((doc['time_end'].value.getMillis() - doc['time_start'].value.getMillis())/1000.0)\",\"lang\":\"painless\",\"name\":\"DwellTime\",\"type\":\"number\",\"scripted\":true,\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":false,\"customLabel\":\"\"},{\"count\":0,\"script\":\"if(!doc['watcher.time_start'].empty && !doc['watcher.time_end'].empty) {return((doc['watcher.time_end'].value.getMillis() - doc['watcher.time_start'].value.getMillis())/1000.0)} else {return 0;}\",\"lang\":\"painless\",\"name\":\"AttentionTime\",\"type\":\"number\",\"scripted\":true,\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":false,\"customLabel\":\"\"},{\"count\":0,\"script\":\"double angryTime;\\ndouble happyTime;\\ndouble neutralTime;\\ndouble surprisedTime;\\ndouble maxTime = 0.0;\\nString emotion;\\n\\n\\nif(!doc['angry.time_start'].empty && !doc['angry.time_end'].empty) {angryTime = (doc['angry.time_end'].value.getMillis() - doc['angry.time_start'].value.getMillis())/1000.0} else {angryTime = 0.0;}\\nif(!doc['happy.time_start'].empty && !doc['happy.time_end'].empty) {happyTime = (doc['happy.time_end'].value.getMillis() - doc['happy.time_start'].value.getMillis())/1000.0} else {happyTime = 0.0;}\\nif(!doc['neutral.time_start'].empty && !doc['neutral.time_end'].empty) {neutralTime = (doc['neutral.time_end'].value.getMillis() - doc['neutral.time_start'].value.getMillis())/1000.0} else {neutralTime = 0.0;}\\nif(!doc['surprised.time_start'].empty && !doc['surprised.time_end'].empty) {surprisedTime = (doc['surprised.time_end'].value.getMillis() - doc['surprised.time_start'].value.getMillis())/1000.0} else {surprisedTime = 0.0;}\\n\\nif( angryTime > maxTime) {emotion='angry'}\\nif( happyTime > maxTime) {emotion='happy'}\\nif( neutralTime > maxTime) {emotion='neutral'}\\nif( surprisedTime > maxTime) {emotion='surprised'}\\n\\nreturn(emotion)\",\"lang\":\"painless\",\"name\":\"mostPopularEmotion\",\"type\":\"string\",\"scripted\":true,\"searchable\":true,\"aggregatable\":true,\"readFromDocValues\":false,\"customLabel\":\"\"}]"
+      }
+   }
+}

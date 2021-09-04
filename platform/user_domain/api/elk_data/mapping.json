@@ -1,0 +1,341 @@
+{
+   "retail_analytics": {
+     "mappings": {
+       "runtime": {
+          "dayOfWeek": {
+            "type": "keyword",
+            "script": {
+              "source": "emit(ZonedDateTime.parse(params._source.time_start).getDayOfWeek().toString())"
+            }
+          },
+         "hourOfDay": {
+          "type": "long",
+          "script": {
+            "source": "emit(ZonedDateTime.parse(params._source.time_start).getHour())"
+          }
+        }
+       },
+       "properties": {
+         "age": {
+           "type": "long"
+         },
+         "creation_date": {
+           "type": "date_nanos"
+         },
+         "gender": {
+           "type": "text",
+           "fields": {
+             "keyword": {
+               "type": "keyword",
+               "ignore_above": 256
+             }
+           }
+         },
+         "person_id": {
+           "type": "text",
+           "fields": {
+             "keyword": {
+               "type": "keyword",
+               "ignore_above": 256
+             }
+           }
+         },
+         "id": {
+           "type": "text",
+           "fields": {
+             "keyword": {
+               "type": "keyword",
+               "ignore_above": 256
+             }
+           }
+         },
+         "time_start": {
+           "type": "date"
+         },
+         "time_end": {
+           "type": "date"
+         },
+         "angry": {
+           "properties": {
+             "time_start": {
+               "type": "date"
+             },
+             "time_end": {
+               "type": "date"
+             }
+           }
+         },
+         "happy": {
+           "properties": {
+             "time_start": {
+               "type": "date"
+             },
+             "time_end": {
+               "type": "date"
+             }
+           }
+         },
+         "neutral": {
+           "properties": {
+             "time_start": {
+               "type": "date"
+             },
+             "time_end": {
+               "type": "date"
+             }
+           }
+         },
+         "surprised": {
+           "properties": {
+             "time_start": {
+               "type": "date"
+             },
+             "time_end": {
+               "type": "date"
+             }
+           }
+         },
+         "roi": {
+           "properties": {
+             "id": {
+               "type": "text",
+               "fields": {
+                 "keyword": {
+                   "type": "keyword",
+                   "ignore_above": 256
+                 }
+               }
+             },
+             "time_end": {
+               "type": "date"
+             },
+             "time_start": {
+               "type": "date"
+             },
+             "title": {
+               "type": "text",
+               "fields": {
+                 "keyword": {
+                   "type": "keyword",
+                   "ignore_above": 256
+                 }
+               }
+             }
+           }
+         },
+         "is_staff": {
+           "type": "boolean"
+         },
+         "first_visit": {
+           "type": "boolean"
+         },
+         "watcher" : {
+          "properties" : {
+            "time_end" : {
+              "type" : "date"
+            },
+            "time_start" : {
+              "type" : "date"
+            }
+          }
+        },
+         "actions": {
+           "properties": {
+             "kind": {
+               "type": "text",
+               "fields": {
+                 "keyword": {
+                   "type": "keyword",
+                   "ignore_above": 256
+                 }
+               }
+             },
+             "direction": {
+               "type": "text",
+               "fields": {
+                 "keyword": {
+                   "type": "keyword",
+                   "ignore_above": 256
+                 }
+               }
+             }
+           }
+         }
+       }
+     }
+   },
+   "advertising_analytics": {
+     "mappings": {
+       "runtime": {
+          "dayOfWeek": {
+            "type": "keyword",
+            "script": {
+              "source": "emit(ZonedDateTime.parse(params._source.time_start).getDayOfWeek().toString())"
+            }
+          },
+         "hourOfDay": {
+          "type": "long",
+          "script": {
+            "source": "emit(ZonedDateTime.parse(params._source.time_start).getHour())"
+          }
+        }
+       },
+       "properties": {
+         "age": {
+           "type": "long"
+         },
+         "creation_date": {
+           "type": "date_nanos"
+         },
+         "gender": {
+           "type": "text",
+           "fields": {
+             "keyword": {
+               "type": "keyword",
+               "ignore_above": 256
+             }
+           }
+         },
+         "person_id": {
+           "type": "text",
+           "fields": {
+             "keyword": {
+               "type": "keyword",
+               "ignore_above": 256
+             }
+           }
+         },
+         "id": {
+           "type": "text",
+           "fields": {
+             "keyword": {
+               "type": "keyword",
+               "ignore_above": 256
+             }
+           }
+         },
+         "medias": {
+           "type": "text",
+           "fields": {
+             "keyword": {
+               "type": "keyword",
+               "ignore_above": 256
+             }
+           }
+         },
+         "time_start": {
+           "type": "date"
+         },
+         "time_end": {
+           "type": "date"
+         },
+         "angry": {
+           "properties": {
+             "time_start": {
+               "type": "date"
+             },
+             "time_end": {
+               "type": "date"
+             }
+           }
+         },
+         "happy": {
+           "properties": {
+             "time_start": {
+               "type": "date"
+             },
+             "time_end": {
+               "type": "date"
+             }
+           }
+         },
+         "neutral": {
+           "properties": {
+             "time_start": {
+               "type": "date"
+             },
+             "time_end": {
+               "type": "date"
+             }
+           }
+         },
+         "surprised": {
+           "properties": {
+             "time_start": {
+               "type": "date"
+             },
+             "time_end": {
+               "type": "date"
+             }
+           }
+         },
+         "roi": {
+           "properties": {
+             "id": {
+               "type": "text",
+               "fields": {
+                 "keyword": {
+                   "type": "keyword",
+                   "ignore_above": 256
+                 }
+               }
+             },
+             "time_end": {
+               "type": "date"
+             },
+             "time_start": {
+               "type": "date"
+             },
+             "title": {
+               "type": "text",
+               "fields": {
+                 "keyword": {
+                   "type": "keyword",
+                   "ignore_above": 256
+                 }
+               }
+             }
+           }
+         },
+         "is_staff": {
+           "type": "boolean"
+         },
+         "first_visit": {
+           "type": "boolean"
+         },
+         "watcher" : {
+          "properties" : {
+            "time_end" : {
+              "type" : "date"
+            },
+            "time_start" : {
+              "type" : "date"
+            }
+          }
+        },
+         "actions": {
+           "properties": {
+             "kind": {
+               "type": "text",
+               "fields": {
+                 "keyword": {
+                   "type": "keyword",
+                   "ignore_above": 256
+                 }
+               }
+             },
+             "direction": {
+               "type": "text",
+               "fields": {
+                 "keyword": {
+                   "type": "keyword",
+                   "ignore_above": 256
+                 }
+               }
+             }
+           }
+         }
+       }
+     }
+   }
+}

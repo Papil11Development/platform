@@ -1,0 +1,12 @@
+{
+    "block_config": {
+        "unit_type": "_LIVENESS_ANTI_SPOOFING"
+    },
+    "meta_config":{
+        "conversion_needle": "RGB",
+        "versions": {
+            "v1": {},
+            "v2": {}
+        }
+    }
+}

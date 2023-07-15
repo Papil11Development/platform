@@ -1,6 +1,11 @@
+import copy
+import io
 import json
 import math
 import uuid
+from collections import namedtuple
+from dataclasses import dataclass, field
+
 import bson
 import base64
 import datetime
@@ -8,18 +13,21 @@ from itertools import chain
 from functools import partial
 from typing import List, Tuple, Union, Optional
 
-
 import jsonschema
+import requests
+from PIL import Image
 from django.core.cache import cache
 from django.db import transaction
 from django.db.models import QuerySet
 
 from data_domain.models import Sample, Activity, BlobMeta, Blob
+from main import settings
 from user_domain.models import Workspace
-from platform_lib.validation.schemes import sample_meta_scheme
+from platform_lib.validation.schemes import activation_schema, activity_meta_scheme, sample_meta_scheme
 from platform_lib.exceptions import BadInputDataException
-from platform_lib.utils import get_detect, face_processing_data_parser, utcnow_with_tz, SampleObjectsName, \
-    estimate_quality
+from platform_lib.utils import get_detect, face_processing_data_parser,\
+    utcnow_with_tz, SampleObjectsName, camel, snake, fixed_validate_image
+from platform_lib.managers import BaseProcessManager
 
 
 class AgentDataManager:
@@ -59,12 +67,12 @@ class AgentDataManager:
     @classmethod
     def validate_sample_meta(cls, meta: dict):
         try:
-            jsonschema.validate(meta, sample_meta_scheme)
+            jsonschema.validate(meta, activity_meta_scheme)
         except jsonschema.ValidationError:
             try:
                 # bson doesn't decode numbers therefore try to decode meta data
                 s = {k: cls.__json_decoder(v) for k, v in meta.items()}
-                jsonschema.validate(s, sample_meta_scheme)
+                jsonschema.validate(s, activity_meta_scheme)
             except Exception:
                 return False
         return True
@@ -161,6 +169,17 @@ class SampleManager:
     def get_sample(workspace_id: str, sample_id: str) -> Sample:
         return Sample.objects.get(id=sample_id, workspace_id=workspace_id)
 
+    @staticmethod
+    def get_samples(workspace_id: str, sample_ids: List[str]) -> QuerySet:
+        return Sample.objects.filter(id__in=sample_ids, workspace_id=workspace_id)
+
+    @staticmethod
+    def get_sample_ids(workspace_id: str, sample_ids: list) -> QuerySet:
+        samples = Sample.objects.filter(workspace_id=workspace_id, id__in=sample_ids).values_list('id', flat=True)
+        if samples.count() != len(set(sample_ids)):
+            raise BadInputDataException("0x943b3c24")
+        return samples
+
     @classmethod
     def update_sample_meta(cls, sample_id: Union[str, uuid.UUID], meta: dict) -> Sample:
         with transaction.atomic():
@@ -174,10 +193,10 @@ class SampleManager:
         sample_meta.get(cls.__platform_object_key(), [{}])[0].update(new_info)
 
     @classmethod
-    def get_template_id(cls, sample_meta: dict, template_version: str) -> str:
+    def get_template_id(cls, sample_meta: dict, template_version: str) -> Optional[str]:
         old_template = sample_meta.get(f'${template_version}', {}).get('id')
         new_template = sample_meta.get(cls.__platform_object_key(), [{}])[0] \
-                                  .get('templates', {}).get(f'${template_version}', {}).get('id')
+            .get('templates', {}).get(f'${template_version}', {}).get('id')
 
         return old_template or new_template
 
@@ -187,22 +206,6 @@ class SampleManager:
 
         blob = BlobMeta.objects.select_related('blob').get(id=template_id).blob.data.tobytes()
         return base64.standard_b64encode(blob).decode()
-
-    @classmethod
-    def update_sample_quality(cls,
-                              sample_id: Union[str, uuid.UUID],
-                              template_version: str) -> Tuple[bool, Sample, float]:
-        with transaction.atomic():
-            sample = Sample.objects.select_for_update().get(id=sample_id)
-            quality = estimate_quality(template_version, cls.get_face_crop_id(sample.meta))
-
-            if math.isinf(quality):
-                return False, sample, quality
-
-            cls.update_face_object(sample.meta, {'quality': quality})
-            sample.save()
-
-        return True, sample, quality
 
     @classmethod
     def get_image(cls, sample_meta: dict) -> Optional[bytes]:
@@ -271,10 +274,10 @@ class SampleManager:
         return meta
 
     @staticmethod
-    def process_image(image, template_version, eyes_list=None, request_id=None) -> dict:
+    def process_image(image, template_version, eyes_list=None, request_id=None, is_anonymous=False) -> dict:
         faces = get_detect(image=image, face_info=eyes_list,
                            templates_to_create=[template_version],
-                           request_id=request_id)
+                           request_id=request_id, is_anonymous=is_anonymous)
         if not faces:
             raise BadInputDataException('0x95bg42fd')
 
@@ -288,10 +291,6 @@ class SampleManager:
     @staticmethod
     def delete_samples(samples: QuerySet[Sample]) -> int:
         return samples.select_for_update().delete()[0]
-
-    @staticmethod
-    def get_sample(workspace_id: str, sample_id: str) -> Sample:
-        return Sample.objects.get(id=sample_id, workspace_id=workspace_id)
 
     @staticmethod
     def change_meta_to_new(workspace_id: str, destination_sample_id: str, origin_sample_id: str) -> Sample:
@@ -448,10 +447,484 @@ class ActivityManager:
                       reverse=True)[0] if body_processes else None
 
     @classmethod
-    def get_sample_id(cls, activity: Activity) -> str:
+    def get_sample_id(cls, activity: Activity) -> Optional[str]:
         return (cls.get_face_processes(activity) or [{}])[0].get('sample_id')
 
     @classmethod
     def get_samples_ids(cls, activity: Activity) -> List[str]:
         face_processes = cls.get_face_processes(activity)
         return list(filter(None, map(lambda x: x.get("sample_id"), face_processes)))
+
+
+class SampleEnricher:
+    @dataclass(frozen=True, order=True)
+    class FunctionContainer:
+        sort_index: int = field(init=False, repr=False)
+        func: callable = field(compare=False)
+        func_name: str = field(init=False)
+        weight: int
+
+        def __post_init__(self):
+            object.__setattr__(self, 'sort_index', self.weight)
+            # for proper comparison
+            object.__setattr__(self, 'func_name', self.func.__name__)
+
+        def __str__(self):
+            return f'{self.func_name}_{self.weight}'
+
+    fitter_validation_scheme = {
+        "type": "object",
+        "required": ["$image", "objects"],
+        "properties": {
+            "$image": {
+                "type": "string",
+            },
+            "objects": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "class": {
+                            "type": "string",
+                            "enum": ["face", "body"]
+                        },
+                        "fitter": {
+                            "type": "object",
+                            "required": ["fitter_type", "keypoints", "left_eye", "right_eye"],
+                            "properties": {
+                                "fitter_type": {
+                                    "type": "string",
+                                    "enum": ["fda"]
+                                },
+                                "keypoints": {
+                                    "type": "array",
+                                    "minItems": 63,
+                                    "maxItems": 63,
+                                    "items": {"type": "number"}
+                                },
+                                "left_eye": {
+                                    "type": "array",
+                                    "minItems": 2,
+                                    "maxItems": 2,
+                                    "items": {"type": "number"}
+                                },
+                                "right_eye": {
+                                    "type": "array",
+                                    "minItems": 2,
+                                    "maxItems": 2,
+                                    "items": {"type": "number"}
+                                },
+                            },
+                            "additionalProperties": False
+                        }
+                    },
+                    "if": {
+                        "properties": {"class": {"const": "face"}}
+                    },
+                    "then": {
+                        "required": ["fitter"]
+                    },
+                },
+                "minimum": 1
+            }
+        },
+    }
+    bbox_validation_scheme = {
+        "type": "object",
+        "required": ["$image", "objects"],
+        "properties": {
+            "$image": {
+                "type": "string",
+            },
+            "objects": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "class": {
+                            "type": "string",
+                            "enum": ["face", "body"]
+                        },
+                        "bbox": {
+                            "type": "array",
+                            "minItems": 4,
+                            "maxItems": 4,
+                            "items": {"type": "number"}
+                        },
+                    },
+                    "if": {
+                        "properties": {"class": {"const": "face"}}
+                    },
+                    "then": {
+                        "required": ["bbox"]
+                    },
+                },
+                "minimum": 1
+            }
+        },
+    }
+
+    to_camel = ["total_score",
+                "is_sharp",
+                "sharpness_score",
+                "is_evenly_illuminated",
+                "illumination_score",
+                "no_flare",
+                "is_left_eye_opened",
+                "left_eye_openness_score",
+                "is_right_eye_opened",
+                "right_eye_openness_score",
+                "is_rotation_acceptable",
+                "max_rotation_deviation",
+                "not_masked",
+                "not_masked_score",
+                "is_neutral_emotion",
+                "neutral_emotion_score",
+                "is_eyes_distance_acceptable",
+                "eyes_distance",
+                "is_margins_acceptable",
+                "margin_outer_deviation",
+                "margin_inner_deviation",
+                "is_not_noisy",
+                "noise_score",
+                "watermark_score",
+                "has_watermark",
+                "dynamic_range_score",
+                "is_dynamic_range_acceptable",
+                "background_uniformity_score",
+                "is_background_uniform"]
+
+    to_snake = list(map(camel, to_camel))
+
+    @classmethod
+    def _convert_to_ias_format(cls, original_sample: dict) -> Tuple[dict, dict]:
+        converted_sample = copy.deepcopy(original_sample)
+
+        def recursion(original_sample_: Union[dict, list],
+                      result_sample_: Union[dict, list],
+                      previous_path: List[str],
+                      blob_paths: dict):
+
+            if isinstance(original_sample_, dict):
+                for key, value in original_sample_.items():
+                    if (key.startswith(BaseProcessManager.bsm_indicator) and isinstance(value, dict)):
+                        new_path = copy.copy(previous_path)
+                        new_path.append(key)
+                        blob_paths['_'.join(new_path)] = value
+                        result_sample_[key] = base64.b64encode(
+                            BlobMeta.objects.select_related('blob').get(id=value['id']).blob.data
+                        ).decode("utf-8")
+                    elif isinstance(value, (list, dict)):
+                        new_path = copy.copy(previous_path)
+                        new_path.append(key)
+
+                        recursion(value, result_sample_[key], new_path, blob_paths)
+
+                    if key in cls.to_camel:
+                        result_sample_[camel(key)] = result_sample_.pop(key)
+
+            if isinstance(original_sample_, list):
+                for i, sample_object in enumerate(original_sample_):
+                    if isinstance(sample_object, dict) or isinstance(sample_object, list):
+                        new_path = copy.copy(previous_path)
+                        new_path.append(str(i))
+
+                        recursion(sample_object, result_sample_[i], new_path, blob_paths)
+
+        blob_paths = {}
+        previous_path = []
+
+        recursion(original_sample, converted_sample, previous_path, blob_paths)
+
+        return blob_paths, converted_sample
+
+    @classmethod
+    def _convert_from_ias_format(cls, original_sample: dict, values_dict: dict):
+
+        converted_sample = copy.deepcopy(original_sample)
+
+        def recursion(original_sample_: Union[dict, list],
+                      result_sample_: Union[dict, list],
+                      previous_path: List[str],
+                      values_dict: dict):
+
+            if isinstance(original_sample_, dict):
+                for key, value in original_sample_.items():
+                    snake_key = None
+
+                    if key in cls.to_snake:
+                        snake_key = snake(key)
+                        result_sample_[snake_key] = result_sample_.pop(key)
+
+                    result_key = snake_key or key
+
+                    if key.startswith(BaseProcessManager.bsm_indicator):
+                        new_path = copy.copy(previous_path)
+
+                        new_path.append(result_key)
+
+                        key_path = '_'.join(new_path)
+                        if key_path in values_dict:
+                            result_sample_[result_key] = values_dict[key_path]
+
+                    if isinstance(value, (list, dict)):
+                        new_path = copy.copy(previous_path)
+                        new_path.append(result_key)
+
+                        recursion(value, result_sample_[result_key], new_path, values_dict)
+
+            if isinstance(original_sample_, list):
+                for i, sample_object in enumerate(original_sample_):
+                    if isinstance(sample_object, dict) or isinstance(sample_object, list):
+                        new_path = copy.copy(previous_path)
+                        new_path.append(str(i))
+
+                        recursion(sample_object, result_sample_[i], new_path, values_dict)
+
+        previous_path = []
+
+        recursion(original_sample, converted_sample, previous_path, values_dict)
+
+        return converted_sample
+
+    @staticmethod
+    def _handle__image_api_response_error(response):
+        if response.status_code >= 400:
+            try:
+                error_json = response.json()
+            except ValueError:
+                response.raise_for_status()
+
+            if (detail := error_json.get('detail')) is not None:  # noqa
+                raise Exception(detail)
+            else:
+                raise Exception(str(error_json))
+
+    @classmethod
+    def _handle_image(cls, image: Union[str, bytes], service_url: str, request_id: Optional[str] = None) -> dict:
+        files = {
+            'image': ('image.jpg', image)
+        }
+        headers = {'X_REQUEST_ID': request_id}
+
+        response = requests.post(url=f"{service_url}/process/image", files=files, headers=headers)
+
+        cls._handle__image_api_response_error(response)
+
+        return response.json()
+
+    @classmethod
+    def _handle_sample(cls, sample_data: dict, service_url: str, request_id: Optional[str] = None) -> dict:
+        headers = {'X_REQUEST_ID': request_id}
+
+        response = requests.post(url=f"{service_url}/process/sample", json=sample_data, headers=headers)
+
+        cls._handle__image_api_response_error(response)
+
+        return response.json()
+
+    def _send_request_based_on_source(self, service_url: str, sample_validation_cheme: dict = None):
+        if self._sample is None:
+            return self._handle_image(image=self._image, service_url=service_url, request_id=self.request_id)
+        else:
+            if sample_validation_cheme is not None:
+                # Check if current sample data is enough for quality_estimator
+                jsonschema.validate(self._sample, sample_validation_cheme)
+
+            return self._handle_sample(sample_data=self._sample, service_url=service_url, request_id=self.request_id)
+
+    def __init__(self,
+                 image: Optional[Union[str, bytes]] = None,
+                 sample_meta: Optional[dict] = None,
+                 request_id: Optional[str] = None):
+        self._sample = self._image = self._sample_indexes = None
+        self._sample_blob_ids = {}
+        self.request_id = request_id
+
+        if (image is not None and sample_meta is not None) or (image is None and sample_meta is None):
+            raise Exception('Wrong SampleEnricher input')
+
+        if sample_meta is not None:
+            jsonschema.validate(sample_meta, sample_meta_scheme)
+
+            self._sample_indexes = {}
+
+            decoded_img = (base64.standard_b64decode(sample_meta['$image'])
+                           if isinstance(sample_meta['$image'], str) else sample_meta['$image'])
+            fixed_validate_image(decoded_img)
+            self._image = decoded_img
+
+            self._sample_blob_ids, self._sample = self._convert_to_ias_format(sample_meta)
+
+        if image is not None:
+            decoded_img = base64.standard_b64decode(image) if isinstance(image, str) else image
+            fixed_validate_image(decoded_img)
+
+            self._image = decoded_img
+
+    # Not use. Detect change bbox and face order
+    def face_detector(self):
+        result = self._send_request_based_on_source(settings.FACE_DETECTOR_SERVICE_URL)
+
+        self._sample = result
+        return self
+
+    def face_fitter(self):
+        result = self._send_request_based_on_source(settings.FACE_DETECTOR_FITTER_SERVICE_URL)
+
+        image = Image.open(io.BytesIO(self._image))
+
+        width, height = image.size
+
+        for object in result['objects']:
+            bbox = object['bbox']
+
+            crop_margin = 0.3
+            max_thumbnail_size = (300, 300)
+
+            left_top_x = int(bbox[0] * width)
+            left_top_y = int(bbox[1] * height)
+
+            right_bottom_x = int(bbox[2] * width)
+            right_bottom_y = int(bbox[3] * height)
+
+            bbox_width = right_bottom_x - left_top_x
+            bbox_height = right_bottom_y - left_top_y
+
+            converted_left_x = int(max(left_top_x - bbox_width * crop_margin, 0))
+            converted_left_y = int(max(left_top_y - bbox_height * crop_margin, 0))
+
+            converted_right_x = int(min(right_bottom_x + bbox_width * crop_margin, width))
+            converted_right_y = int(min(right_bottom_y + bbox_height * crop_margin, height))
+
+            img_byte_arr = io.BytesIO()
+
+            crop_img = image.crop(
+                (converted_left_x, converted_left_y, converted_right_x, converted_right_y)
+            )
+            crop_img.thumbnail(max_thumbnail_size)
+            crop_img.save(img_byte_arr, format='JPEG')
+
+        self._sample = result
+        return self
+
+    def template_extractor(self):
+        self._sample = self._send_request_based_on_source(settings.TEMPLATE_EXTRACTOR_SERVICE_URL)
+        return self
+
+    def liveness_estimator(self):
+        self._sample = self._send_request_based_on_source(settings.LIVENESS_ESTIMATOR_SERVICE_URL)
+        return self
+
+    def emotion_estimator(self):
+        self._sample = self._send_request_based_on_source(settings.EMOTION_ESTIMATOR_SERVICE_URL,
+                                                          sample_validation_cheme=self.bbox_validation_scheme)
+        return self
+
+    def gender_estimator(self):
+        self._sample = self._send_request_based_on_source(settings.GENDER_ESTIMATOR_SERVICE_URL,
+                                                          sample_validation_cheme=self.bbox_validation_scheme)
+        return self
+
+    def mask_estimator(self):
+        self._sample = self._send_request_based_on_source(settings.MASK_ESTIMATOR_SERVICE_URL,
+                                                          sample_validation_cheme=self.bbox_validation_scheme)
+        return self
+
+    def age_estimator(self):
+        self._sample = self._send_request_based_on_source(settings.AGE_ESTIMATOR_SERVICE_URL,
+                                                          sample_validation_cheme=self.bbox_validation_scheme)
+        return self
+
+    def quality_estimator(self):
+        if self._sample is None:
+            raise Exception('Quality estimation requires detected face')
+
+        # Check if current sample data is enough for quality_estimator
+        jsonschema.validate(self._sample, self.fitter_validation_scheme)
+
+        result = self._handle_sample(self._sample, settings.QUALITY_ASSESSMENT_SERVICE_URL, self.request_id)
+
+        self._sample = result
+        return self
+
+    def get_result(self) -> dict:
+        # result = copy.deepcopy(self._sample)
+
+        # TODO [NIAS] wait for template format fix
+
+        result = self._convert_from_ias_format(self._sample, self._sample_blob_ids)
+
+        for object_ in result['objects']:
+            if (template11v1000 := object_.get('$template')) is not None:
+                object_['templates'] = {'$template11v1000': template11v1000}
+                del object_['$template']
+                del object_['template_size']
+
+        jsonschema.validate(result, sample_meta_scheme)
+        return result
+
+    function_containers = (
+        namedtuple("FunctionContainers", ['face_detector',
+                                          'face_fitter',
+                                          'template_extractor',
+                                          'liveness_estimator',
+                                          'gender_estimator',
+                                          'emotion_estimator',
+                                          'mask_estimator',
+                                          'age_estimator',
+                                          'quality_estimator'])
+        (FunctionContainer(face_detector, 0),
+         FunctionContainer(face_fitter, 0),
+         FunctionContainer(template_extractor, 2),
+         FunctionContainer(liveness_estimator, 0),
+         FunctionContainer(gender_estimator, 1),
+         FunctionContainer(emotion_estimator, 1),
+         FunctionContainer(mask_estimator, 1),
+         FunctionContainer(age_estimator, 1),
+         FunctionContainer(quality_estimator, 1))
+    )
+
+    @classmethod
+    def get_functions_by_fields(cls, fields: List[str]) -> List[callable]:
+        function_mapping = {
+            # ('id', 'class', 'confidence', 'bbox'): [cls.function_containers.face_detector],
+            ('id',
+             'class',
+             'confidence',
+             'bbox',
+             'fitter',
+             'angles',
+             'cropImage'): [cls.function_containers.face_fitter],
+            ('id', 'class', 'confidence', 'bbox', 'templates'): [cls.function_containers.template_extractor],
+            ('id', 'class', 'confidence', 'bbox', 'liveness'): [cls.function_containers.liveness_estimator],
+            ('id', 'class', 'gender'): [
+                cls.function_containers.face_fitter, cls.function_containers.gender_estimator
+            ],
+            ('id', 'class', 'age'): [
+                cls.function_containers.face_fitter, cls.function_containers.age_estimator
+            ],
+            ('id', 'class', 'mask'): [
+                cls.function_containers.face_fitter, cls.function_containers.mask_estimator
+            ],
+            ('id', 'class', 'emotions'): [
+                cls.function_containers.face_fitter, cls.function_containers.emotion_estimator
+            ],
+            ('id', 'class', 'bbox', 'quality'): [
+                cls.function_containers.face_fitter, cls.function_containers.quality_estimator
+            ],
+        }
+
+        field_function_containers = []
+
+        for field_ in fields:
+            for key in function_mapping.keys():
+                if field_ in key:
+                    field_function_containers = field_function_containers + function_mapping[key]
+                    break
+
+        field_function_containers = set(field_function_containers)
+
+        print(f'Func: {[str(cont) for cont in field_function_containers]}')
+
+        return [func_container.func for func_container in sorted(field_function_containers)]

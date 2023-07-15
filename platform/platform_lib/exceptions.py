@@ -37,6 +37,7 @@ class CodedException(Exception):
             "0xf8be6762": "Max num of candidates must be between 1 and 100",
             "0x006dd808": "Image width is over the limit",
             "0x006dd809": "Image height is over the limit",
+            "0x6fd9bed7": "Invalid image",
             "0x03b73f98": "File size larger than {}",
             "0x15449f83": "{} event already exists in this session",
             "0xcac45dce": "Lost event must be created after Found event in this session",

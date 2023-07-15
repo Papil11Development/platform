@@ -4,6 +4,7 @@ from django.apps import apps
 from django.db import models, transaction
 from django.dispatch import receiver
 from django.db.models.signals import pre_delete, post_delete, post_save
+from django.contrib.postgres.fields import ArrayField
 
 from licensing.common_managers import LicensingCommonEvent
 from platform_lib.exceptions import LicenseNotExist
@@ -49,6 +50,23 @@ class ProfileGroup(models.Model):
 
     class Meta:
         unique_together = ("profile", "label")
+
+
+class ProfileSettings(models.Model):
+
+    id = models.UUIDField(primary_key=True, unique=True, default=uuid.uuid4, editable=False)
+    workspace_id = models.UUIDField(null=False, editable=False)
+
+    extra_fields = ArrayField(models.CharField(max_length=32), default=list)
+
+    last_modified = models.DateTimeField(auto_now=True, null=True, blank=True)
+    creation_date = models.DateTimeField(auto_now_add=True, null=True, blank=True)
+
+    objects = models.Manager()
+
+    class Meta:
+        db_table = 'profile_settings'
+        verbose_name_plural = 'ProfileSettings'
 
 
 @receiver(pre_delete, sender=Profile)

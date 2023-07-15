@@ -1,1 +1,1 @@
-from .main import MatcherAPI
+from .main import MatcherAPI, ActivityMatcherAPI

@@ -141,7 +141,8 @@ class InternalMutation:
                 },
                 'activity_score_threshold': settings.DEFAULT_SCORE_THRESHOLD_VALUE,
                 'notification_score_threshold': settings.DEFAULT_SCORE_THRESHOLD_VALUE,
-                'sample_ttl': settings.SAMPLE_TTL
+                'sample_ttl': settings.SAMPLE_TTL,
+                'activity_ttl': settings.ACTIVITY_TTL
             })
 
         with transaction.atomic():

@@ -1,0 +1,16 @@
+{
+    "block_config": {
+        "unit_type": "_QUALITY_ASSESSMENT_ESTIMATOR",
+        "model_path": "",
+        "config_name": "quality_assessment.xml",
+        "sdk_path": "/face_sdk"
+    },
+    "meta_config":{
+        "conversion_needle": "RGB",
+        "versions": {
+            "v1": {},
+            "v2": {}
+        }
+    },
+    "dependencies": ["face-detector-face-fitter"]
+}

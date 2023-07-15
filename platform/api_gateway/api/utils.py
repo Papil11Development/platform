@@ -68,7 +68,7 @@ def check_activation_renewal(token):
     return find_last_activation(activations, token.id) is not None
 
 
-def authorization(perm=None):
+def authorization(perm: Optional[list] = None):
     perm = perm or []
 
     def decorator(func):
@@ -83,7 +83,10 @@ def authorization(perm=None):
             elif (token.is_agent() or token.is_access()) and token.type not in perm:
                 return HttpResponseBadRequest(json.dumps({'errors': 'You are not authorized.'}))
 
-            workspace = get_workspace(token)
+            try:
+                workspace = get_workspace(token)
+            except ObjectDoesNotExist:
+                return HttpResponseBadRequest(json.dumps({'errors': 'Workspace does not exist.'}))
 
             return func(request, *args, workspace=workspace, token=token, **kwargs)
 
@@ -127,15 +130,12 @@ def agent_from_activation_token(token: Token):
     return Agent.objects.get(activations=Activation.objects.get(id=token.id))
 
 
-def get_workspace(token: Token) -> Optional[Workspace]:
-    try:
-        return {
-            'access': lambda: Access.objects.get(id=token.id).workspace,
-            'agent': lambda: Agent.objects.get(id=token.id).workspace,
-            'activation': lambda: agent_from_activation_token(token).workspace
-        }[token.type]()
-    except ObjectDoesNotExist:
-        return None
+def get_workspace(token: Token) -> Workspace:
+    return {
+        'access': lambda: Access.objects.get(id=token.id).workspace,
+        'agent': lambda: Agent.objects.get(id=token.id).workspace,
+        'activation': lambda: agent_from_activation_token(token).workspace
+    }[token.type]()
 
 
 def validate_workspace(workspace: Workspace):

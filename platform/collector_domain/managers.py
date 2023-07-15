@@ -3,7 +3,7 @@ import json
 import logging
 import uuid
 from enum import Enum
-from typing import Union, Tuple, Optional
+from typing import Union, List, Tuple, Optional
 
 from django.conf import settings
 from django.db import transaction
@@ -21,16 +21,19 @@ logger = logging.getLogger(__name__)
 
 
 class CameraManager:
-    def __init__(self, camera_id: str):
-        self.camera = Camera.objects.get(id=camera_id)
+    def __init__(self, camera_id: Union[str, uuid.UUID], workspace_id: Union[str, uuid.UUID]):
+        self.camera = Camera.objects.get(id=camera_id, workspace_id=workspace_id)
 
     def get_camera(self) -> Camera:
         return self.camera
 
-    def change_camera_title(self, title: str) -> bool:
+    @transaction.atomic
+    def update_camera_info(self, info: dict) -> bool:
+        locked_camera = Camera.objects.select_for_update().get(id=self.camera.id)
         try:
-            self.camera.title = title
-            self.camera.save()
+            locked_camera.info.update(info)
+            locked_camera.save()
+            self.camera = locked_camera
             return True
         except Exception as ex:
             print(ex)
@@ -62,21 +65,20 @@ class CameraManager:
     @transaction.atomic
     def create_camera(cls,
                       workspace: Workspace,
-                      title: str,
-                      agent: Agent,
-                      label: Label = None,
+                      info: dict,
+                      agent: Optional[Agent] = None,
+                      label: Optional[Label] = None,
                       standalone: bool = True) -> Camera:
-        camera = Camera.objects.create(workspace=workspace, title=title, agent=agent)
+        camera = Camera.objects.create(workspace=workspace, info=info, agent=agent)
         if label and cls.verify_label(label):
             camera.locations.add(label)
 
         if standalone:
             try:
-                # TODO: fix hardcode 'channels'
                 lic_e_man = LicensingCommonEvent(workspace_id=str(workspace.id))
                 lic_e_man.create_cameras(Camera.objects.filter(workspace=workspace).count())
             except LicenseLimitAttribute:
-                raise LimitException('0x6245cd00', 'Agent limit exceeded')
+                raise LimitException('0x6245cd00', 'Camera limit exceeded')
 
         return camera
 
@@ -98,7 +100,7 @@ class CameraManager:
     @staticmethod
     def get_camera_title(camera_id: str) -> Optional[str]:
         camera = Camera.objects.all(Q(is_active__in=[True, False], id=camera_id)).first()
-        return getattr(camera, "title", None)
+        return camera.info.get("title")
 
 
 class AttentionAreaManager:
@@ -263,6 +265,22 @@ class AgentManager:
                 agent.delete()
             return True
         return False
+
+    @staticmethod
+    @transaction.atomic
+    def add_cameras(agent_id: uuid.UUID, camera_ids: List[uuid.UUID], workspace: Workspace) -> bool:
+        agent = Agent.objects.select_for_update().get(workspace=workspace, id=agent_id)
+        agent.cameras.add(*Camera.objects.filter(workspace=workspace, id__in=camera_ids))
+        agent.save()
+        return agent
+
+    @staticmethod
+    @transaction.atomic
+    def remove_cameras(agent_id: uuid.UUID, camera_ids: List[uuid.UUID], workspace: Workspace) -> bool:
+        agent = Agent.objects.select_for_update().get(workspace=workspace, id=agent_id)
+        agent.cameras.remove(*Camera.objects.filter(workspace=workspace, id__in=camera_ids))
+        agent.save()
+        return agent
 
 
 class AgentIndexEventManager:

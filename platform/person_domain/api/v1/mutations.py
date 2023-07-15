@@ -23,7 +23,7 @@ from platform_lib.validation import is_valid_json
 from platform_lib.validation.schemes import profile_info_scheme
 from platform_lib.types import CustomBinaryType
 from platform_lib.strawberry_auth.permissions import IsHaveAccess, IsWorkspaceActive
-from platform_lib.utils import estimate_quality, get_workspace_id
+from platform_lib.utils import get_workspace_id
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "main.settings")
 django.setup()
@@ -86,6 +86,7 @@ class Mutation:
 
         objects_key = f'objects@{SampleObjectsName.PROCESSING_CAPTURER}'
 
+        # TODO [NIAS] Not work
         processing_result = SampleManager.process_image(image=image, template_version=template_version)
         raw_template = processing_result[objects_key][0]['templates'][f"${template_version}"]
 
@@ -103,7 +104,7 @@ class Mutation:
             template_blob_meta.meta.update({'sample_id': str(sample.id)})
             template_blob_meta.save()
 
-        _, sample, quality = SampleManager.update_sample_quality(sample.id, template_version)
+        quality = processing_result[objects_key][0]['quality']
 
         search_list = MatcherAPI.search(workspace_id, template_version, [raw_template], 1)
 

@@ -16,14 +16,25 @@ from datetime import datetime
 from pathlib import Path
 from datetime import timedelta
 from dateutil.relativedelta import relativedelta
+from plib.tracing import set_tracing_flag
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 from urllib.parse import quote
 
 import pytz
 
-BASE_DIR = Path(__file__).resolve().parent.parent
 
+def resolve_strange_bool(env_name):  # only for backward compatibility
+    e = os.environ.get(env_name, False)
+    if type(e) is str:
+        if e in ['false', 'False', '', ' ']:
+            return False
+        elif e in ['true', 'True']:
+            return True
+    return bool(int(e))
+
+
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/3.2/howto/deployment/checklist/
@@ -63,6 +74,15 @@ INSTALLED_APPS = [
     'licensing',
 ]
 
+PRODUCT_VERSION = os.environ.get('PRODUCT_VERSION', 'stag')
+
+# TRACING SETTINGS
+SERVICE_NAME = f"backend-{PRODUCT_VERSION}"
+TRACING_ENABLED = json.loads(os.environ.get('TRACING_ENABLED', "False").lower())
+TRACER_HOST = os.environ.get('TRACER_HOST', "0.0.0.0")
+TRACER_PORT = os.environ.get('TRACER_PORT', 4317)
+TRACER_URL = f"http://{TRACER_HOST}:{TRACER_PORT}"
+
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -70,8 +90,13 @@ MIDDLEWARE = [
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'django.middleware.clickjacking.XFrameOptionsMiddleware'
 ]
+
+set_tracing_flag(bool(TRACING_ENABLED))
+
+if TRACING_ENABLED:
+    MIDDLEWARE.append('api_gateway.middleware.TraceMiddleware')
 
 ROOT_URLCONF = 'main.urls'
 
@@ -251,7 +276,7 @@ DETAIL_CARD = f'{LICENSE_SERVER_URL}/sso-auth/?service={LICENSING_PRODUCT_NAME}&
 CHECKOUT_UPGRADE = f'{LICENSE_SERVER_URL}/sso-auth/?service={LICENSING_PRODUCT_NAME}&workspace_id={{}}&upgrade='
 
 # ELK stack
-ELK_URL_INT = os.environ.get('ELK_URL_INT', 'http://192.168.45.59')
+ELK_URL_INT = os.environ.get('ELK_URL_INT')
 ELASTIC_PORT_INT = os.environ.get('ELASTIC_PORT_INT', 9200)
 ELASTIC_URL_INT = f'{ELK_URL_INT}:{ELASTIC_PORT_INT}'
 AUTH_TYPE_INT = 'ApiKey'
@@ -261,19 +286,20 @@ ELASTIC_HEADERS_INT = {'Content-Type': 'application/json', 'kbn-xsrf': 'true',
 
 
 ELASTIC_SCHEME = 'https' if os.environ.get('IS_ELASTIC_HTTPS') else 'http'
-KIBANA_SCHEME = 'https' if os.environ.get('IS_KIBANA_HTTPS') else 'http'
+KIBANA_SCHEME_EXT = 'https' if os.environ.get('IS_KIBANA_HTTPS_EXT') else 'http'
+KIBANA_SCHEME_PUB = 'https' if os.environ.get('IS_KIBANA_HTTPS_PUB') else 'http'
 
-ELASTIC_HOST_EXT = os.environ.get('ELASTIC_HOST_EXT', "192.168.45.59")
+ELASTIC_HOST_EXT = os.environ.get('ELASTIC_HOST_EXT')
 ELASTIC_PORT_EXT = os.environ.get('ELASTIC_PORT_EXT', 9200)
 ELASTIC_URL_EXT = f'{ELASTIC_SCHEME}://{ELASTIC_HOST_EXT}:{ELASTIC_PORT_EXT}'
 
-KIBANA_HOST_EXT = os.environ.get('KIBANA_HOST_EXT', "192.168.45.59")
+KIBANA_HOST_EXT = os.environ.get('KIBANA_HOST_EXT')
 KIBANA_PORT_EXT = os.environ.get('KIBANA_PORT_EXT', 5601)
-KIBANA_URL_EXT = f'{KIBANA_SCHEME}://{KIBANA_HOST_EXT}:{KIBANA_PORT_EXT}'
+KIBANA_URL_EXT = f'{KIBANA_SCHEME_EXT}://{KIBANA_HOST_EXT}:{KIBANA_PORT_EXT}'
 
-PUBLIC_KIBANA_HOST = os.environ.get('PUBLIC_KIBANA_HOST', "192.168.45.59")
+PUBLIC_KIBANA_HOST = os.environ.get('PUBLIC_KIBANA_HOST')
 PUBLIC_KIBANA_PORT = os.environ.get('PUBLIC_KIBANA_PORT', 5601)
-PUBLIC_KIBANA_URL = f'{KIBANA_SCHEME}://{PUBLIC_KIBANA_HOST}:{PUBLIC_KIBANA_PORT}'
+PUBLIC_KIBANA_URL = f'{KIBANA_SCHEME_PUB}://{PUBLIC_KIBANA_HOST}:{PUBLIC_KIBANA_PORT}'
 
 AUTH_TYPE_EXT = 'ApiKey' if os.environ.get('ELASTIC_API_KEY_EXT') else 'Basic'
 AUTH_KEY_EXT = os.environ.get('ELASTIC_API_KEY_EXT') or \
@@ -284,12 +310,12 @@ ELASTIC_HEADERS_EXT = {'Content-Type': 'application/json', 'kbn-xsrf': 'true',
                        'Authorization': f'{AUTH_TYPE_EXT} {AUTH_KEY_EXT}'}
 
 
-DEFAULT_TEMPLATES_VERSION = os.environ.get('DEFAULT_TEMPLATES_VERSION', "template10v100")
+DEFAULT_TEMPLATES_VERSION = os.environ.get('DEFAULT_TEMPLATES_VERSION', "template11v1000")
 DEFAULT_FAR_THRESHOLD_VALUE = os.environ.get('DEFAULT_FAR_THRESHOLD_VALUE', 1e-6)
 DEFAULT_SCORE_THRESHOLD_VALUE = os.environ.get('DEFAULT_SCORE_THRESHOLD_VALUE', 0.85)
 # thresholds were selected by eye: https://www.desmos.com/calculator/kp9rifevzx
-MATCHRESULT_BEST_QUALITY_THRESHOLD = os.environ.get('BEST_QUALITY_THRESHOLD', -750.)
-MATCHRESULT_PASS_QUALITY_THRESHOLD = os.environ.get('PASS_QUALITY_THRESHOLD', -900.)
+MATCHRESULT_BEST_QUALITY_THRESHOLD = float(os.environ.get('BEST_QUALITY_THRESHOLD', -750.))
+MATCHRESULT_PASS_QUALITY_THRESHOLD = float(os.environ.get('PASS_QUALITY_THRESHOLD', -900.))
 
 MATCHER_SERVICE_HOST = os.environ.get('MATCHER_SERVICE_HOST', 'localhost')
 MATCHER_SERVICE_PORT = os.environ.get('MATCHER_SERVICE_PORT', 5001)
@@ -299,9 +325,9 @@ MATCHER_SERVICE_V2_HOST = os.environ.get('MATCHER_SERVICE_V2_HOST', 'localhost')
 MATCHER_SERVICE_V2_PORT = os.environ.get('MATCHER_SERVICE_V2_PORT', 5001)
 MATCHER_SERVICE_V2_URL = f"http://{MATCHER_SERVICE_V2_HOST}:{MATCHER_SERVICE_V2_PORT}"
 
-IMAGE_API_SERVICE_HOST = os.environ.get('IMAGE_API_SERVICE_HOST', 'localhost')
-IMAGE_API_SERVICE_PORT = os.environ.get('IMAGE_API_SERVICE_PORT', 8000)
-IMAGE_API_URL = f'http://{IMAGE_API_SERVICE_HOST}:{IMAGE_API_SERVICE_PORT}'
+ACTIVITY_MATCHER_SERVICE_HOST = os.environ.get('ACTIVITY_MATCHER_SERVICE_HOST', 'localhost')
+ACTIVITY_MATCHER_SERVICE_PORT = os.environ.get('ACTIVITY_MATCHER_SERVICE_PORT', 5002)
+ACTIVITY_MATCHER_SERVICE_URL = f"http://{ACTIVITY_MATCHER_SERVICE_HOST}:{ACTIVITY_MATCHER_SERVICE_PORT}"
 
 QUALITY_SERVICE_HOST = os.environ.get('QUALITY_SERVICE_HOST', '0.0.0.0')
 QUALITY_SERVICE_PORT = os.environ.get('QUALITY_SERVICE_PORT', 5005)
@@ -310,7 +336,51 @@ QUALITY_SERVICE_URL = f"http://{QUALITY_SERVICE_HOST}:{QUALITY_SERVICE_PORT}"
 PROCESSING_SERVICE_HOST = os.environ.get('PROCESSING_SERVICE_HOST', 'localhost')
 PROCESSING_SERVICE_PORT = os.environ.get('PROCESSING_SERVICE_PORT', 5000)
 PROCESSING_SERVICE_URL = f"http://{PROCESSING_SERVICE_HOST}:{PROCESSING_SERVICE_PORT}"
-PROCESSING_SERVICE_CAPTURER = os.environ.get('PROCESSING_SERVICE_CAPTURER', '')
+PROCESSING_SERVICE_CAPTURER = os.environ.get('PROCESSING_SERVICE_CAPTURER', "")
+
+LICENSE_SERVICE_HOST = os.environ.get('LICENSE_SERVICE_HOST', 'localhost')
+LICENSE_SERVICE_PORT = os.environ.get('LICENSE_SERVICE_PORT', 80)
+LICENSE_SERVICE_URL = f'http://{LICENSE_SERVICE_HOST}:{LICENSE_SERVICE_PORT}'
+
+BODY_DETECTOR_HOST = os.environ.get('BODY_DETECTOR_SERVICE_HOST', 'localhost')
+BODY_DETECTOR_PORT = os.environ.get('BODY_DETECTOR_PORT', 80)
+BODY_DETECTOR_SERVICE_URL = f"http://{BODY_DETECTOR_HOST}:{BODY_DETECTOR_PORT}"
+
+FACE_DETECTOR_FITTER_HOST = os.environ.get('FACE_DETECTOR_FACE_FITTER_SERVICE_HOST', 'localhost')
+FACE_DETECTOR_FITTER_PORT = os.environ.get('FACE_DETECTOR_FITTER_PORT', 80)
+FACE_DETECTOR_FITTER_SERVICE_URL = f"http://{FACE_DETECTOR_FITTER_HOST}:{FACE_DETECTOR_FITTER_PORT}"
+
+AGE_ESTIMATOR_HOST = os.environ.get('AGE_ESTIMATOR_SERVICE_HOST', 'localhost')
+AGE_ESTIMATOR_PORT = os.environ.get('AGE_ESTIMATOR_PORT', 80)
+AGE_ESTIMATOR_SERVICE_URL = f"http://{AGE_ESTIMATOR_HOST}:{AGE_ESTIMATOR_PORT}"
+
+EMOTION_ESTIMATOR_HOST = os.environ.get('EMOTION_ESTIMATOR_SERVICE_HOST', 'localhost')
+EMOTION_ESTIMATOR_PORT = os.environ.get('EMOTION_ESTIMATOR_PORT', 80)
+EMOTION_ESTIMATOR_SERVICE_URL = f"http://{EMOTION_ESTIMATOR_HOST}:{EMOTION_ESTIMATOR_PORT}"
+
+GENDER_ESTIMATOR_HOST = os.environ.get('GENDER_ESTIMATOR_SERVICE_HOST', 'localhost')
+GENDER_ESTIMATOR_PORT = os.environ.get('GENDER_ESTIMATOR_PORT', 80)
+GENDER_ESTIMATOR_SERVICE_URL = f"http://{GENDER_ESTIMATOR_HOST}:{GENDER_ESTIMATOR_PORT}"
+
+MASK_ESTIMATOR_HOST = os.environ.get('MASK_ESTIMATOR_SERVICE_HOST', 'localhost')
+MASK_ESTIMATOR_PORT = os.environ.get('MASK_ESTIMATOR_PORT', 80)
+MASK_ESTIMATOR_SERVICE_URL = f"http://{MASK_ESTIMATOR_HOST}:{MASK_ESTIMATOR_PORT}"
+
+LIVENESS_ESTIMATOR_HOST = os.environ.get('FACE_DETECTOR_LIVENESS_ESTIMATOR_SERVICE_HOST', 'localhost')
+LIVENESS_ESTIMATOR_PORT = os.environ.get('FACE_DETECTOR_LIVENESS_ESTIMATOR_PORT', 80)
+LIVENESS_ESTIMATOR_SERVICE_URL = f"http://{LIVENESS_ESTIMATOR_HOST}:{LIVENESS_ESTIMATOR_PORT}"
+
+VERIFY_MATCHER_HOST = os.environ.get('VERIFY_MATCHER_SERVICE_HOST', 'localhost')
+VERIFY_MATCHER_PORT = os.environ.get('VERIFY_MATCHER_PORT', 80)
+VERIFY_MATCHER_SERVICE_URL = f"http://{VERIFY_MATCHER_HOST}:{VERIFY_MATCHER_PORT}"
+
+TEMPLATE_EXTRACTOR_HOST = os.environ.get('FACE_DETECTOR_TEMPLATE_EXTRACTOR_SERVICE_HOST', 'localhost')
+TEMPLATE_EXTRACTOR_PORT = os.environ.get('FACE_DETECTOR_TEMPLATE_EXTRACTOR_PORT', 80)
+TEMPLATE_EXTRACTOR_SERVICE_URL = f"http://{TEMPLATE_EXTRACTOR_HOST}:{TEMPLATE_EXTRACTOR_PORT}"
+
+QUALITY_ASSESSMENT_HOST = os.environ.get('QUALITY_ASSESSMENT_ESTIMATOR_SERVICE_HOST', 'localhost')
+QUALITY_ASSESSMENT_PORT = os.environ.get('QUALITY_ASSESSMENT_ESTIMATOR_PORT', 80)
+QUALITY_ASSESSMENT_SERVICE_URL = f"http://{QUALITY_ASSESSMENT_HOST}:{QUALITY_ASSESSMENT_PORT}"
 
 SERVICE_KEY = os.environ.get("SERVICE_KEY", "1q2w3e4r")
 
@@ -378,39 +448,36 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = 8388608  # 8 Mb
 MAX_IMAGE_WIDTH = int(os.environ.get('MAX_IMAGE_WIDTH', 4032))
 MAX_IMAGE_HEIGHT = int(os.environ.get('MAX_IMAGE_HEIGHT', 4032))
 BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 1000))
-PRODUCT_VERSION = os.environ.get('PRODUCT_VERSION', 'stag')
 
 # CELERY
 TRIGGERS_HANDLER_PERIOD = int(os.environ.get('TRIGGERS_HANDLER_PERIOD', 5))
 PUSH_TO_ELASTIC_PERIOD = int(os.environ.get('PUSH_TO_ELASTIC_PERIOD', 60))
 AGENT_STATUS_CHECK_PERIOD = int(os.environ.get('AGENT_STATUS_CHECK_PERIOD', 30))
+ACTIVITY_STATUS_CHECK_PERIOD = int(os.environ.get('ACTIVITY_STATUS_CHECK_PERIOD', 30))
+INDEX_UPDATE_PERIOD = int(os.environ.get('INDEX_UPDATE_PERIOD', 60))
 
-COLLECTOR_QUEUE = os.environ.get('COLLECTOR_QUEUE', 'elastic-queue')
-ELASTIC_QUEUE = os.environ.get('ELASTIC_QUEUE', 'elastic-queue')
-ELASTIC_MANAGER_QUEUE = os.environ.get('ELASTIC_MANAGER_QUEUE', 'elastic-manager-queue')
-NOTIFICATIONS_QUEUE = os.environ.get('NOTIFICATIONS_QUEUE', 'notification-queue')
-REIDENTIFICATION_QUEUE = os.environ.get('REIDENTIFICATION_QUEUE', 'reidentification-queue')
-SIGNUP_QUEUE = os.environ.get('SIGNUP_QUEUE', 'signup-queue')
-LICENSING_QUEUE = os.environ.get('LICENSING_QUEUE', 'licensing-queue')
-NOTIFICATION_SENDER_QUEUE = os.environ.get('NOTIFICATION_SENDER_QUEUE', 'send-notification-queue')
-QA_QUEUE = os.environ.get('QA_QUEUE', 'qa-queue')
-DATA_PURGE_QUEUE = os.environ.get('DATA_PURGE_QUEUE', 'data-purge-queue')
 
-# ON PREMISE
-IS_ON_PREMISE = os.environ.get('IS_ON_PREMISE')
+COLLECTOR_QUEUE = os.environ.get('COLLECTOR_QUEUE')
+ELASTIC_QUEUE = os.environ.get('ELASTIC_QUEUE')
+ELASTIC_MANAGER_QUEUE = os.environ.get('ELASTIC_MANAGER_QUEUE')
+NOTIFICATIONS_QUEUE = os.environ.get('NOTIFICATIONS_QUEUE')
+REIDENTIFICATION_QUEUE = os.environ.get('REIDENTIFICATION_QUEUE')
+SIGNUP_QUEUE = os.environ.get('SIGNUP_QUEUE')
+LICENSING_QUEUE = os.environ.get('LICENSING_QUEUE')
+NOTIFICATION_SENDER_QUEUE = os.environ.get('NOTIFICATION_SENDER_QUEUE')
+QA_QUEUE = os.environ.get('QA_QUEUE')
+DATA_PURGE_QUEUE = os.environ.get('DATA_PURGE_QUEUE')
+ACTIVITY_QUEUE = os.environ.get('ACTIVITY_QUEUE')
+MATCHER_QUEUE = os.environ.get('MATCHER_QUEUE')
+
+IS_ON_PREMISE = bool(int(os.environ['IS_ON_PREMISE']))
 
 if not IS_ON_PREMISE:
     AUTHENTICATION_BACKENDS.append('api_gateway.auth_backends.LicenseServerAuth')
 
 # Pluggable features
-ENABLE_ELK = bool(os.environ.get('ENABLE_ELK'))
+ENABLE_ELK = resolve_strange_bool('ENABLE_ELK')
 ENABLE_PROFILE_AUTOGENERATION = bool(os.environ.get('ENABLE_PROFILE_AUTOGENERATION'))
-
-LIC_PRODUCT_ID = ''  # to pass mypy validation
-LIC_SERVER_URL = ''  # to pass mypy validation
-if IS_ON_PREMISE:
-    LIC_PRODUCT_ID = os.environ['LIC_PRODUCT_ID']
-    LIC_SERVER_URL = os.environ['LIC_SERVER_URL']
 
 BASE_SITE_URL = os.environ.get('BASE_SITE_URL', 'http://localhost')
 RESET_PASSWORD_URL = f'{BASE_SITE_URL}/password-recovery/new/?userId={{user_id}}&confirmationToken=' \
@@ -425,8 +492,8 @@ EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER')
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD')
 EMAIL_PRODUCT_NAME = os.environ.get('CONTACT_PRODUCT_NAME')
 
-EMAIL_USE_SSL = json.loads(os.environ.get('EMAIL_USE_SSL', "False").lower())
-EMAIL_USE_TLS = json.loads(os.environ.get('EMAIL_USE_TLS', "False").lower())
+EMAIL_USE_SSL = resolve_strange_bool('EMAIL_USE_SSL')
+EMAIL_USE_TLS = resolve_strange_bool('EMAIL_USE_TLS')
 
 
 USAGE_SEND_TIMEOUT = float(os.environ.get('USAGE_SEND_TIMEOUT', 1e-10))
@@ -458,7 +525,7 @@ STRIPE_LIVE_TOKEN = os.environ.get('STRIPE_LIVE_TOKEN', '')
 STRIPE_LIVE_PUBLIC_TOKEN = os.environ.get('STRIPE_LIVE_PUBLIC_TOKEN', '')
 STRIPE_LIVE_WEBHOOK_SECRET = os.environ.get('STRIPE_LIVE_WEBHOOK_SECRET', '')
 
-STRIPE_API_VERSION = os.environ.get('STRIPE_API_VERSION')
+STRIPE_API_VERSION = os.environ.get('STRIPE_API_VERSION', "2020-08-27")
 PAYMENT_MODE = os.environ.get('PAYMENT_MODE', 'test')
 
 WORKSPACE_CLEANING_DELTA = os.environ.get('WORKSPACE_CLEANING_DELTA')
@@ -467,7 +534,29 @@ WORKSPACE_CLEANING_DELTA = timedelta(seconds=int(WORKSPACE_CLEANING_DELTA)) if \
     WORKSPACE_CLEANING_DELTA else relativedelta(months=1)
 
 # Default values
+ACTIVITY_TTL = int(os.environ.get('ACTIVITY_TTL', 2592000))  # in seconds
 SAMPLE_TTL = int(os.environ.get('SAMPLE_TTL', 2592000))  # in seconds
 QUERY_LIMIT = int(os.environ.get('QUERY_LIMIT', 100))
+ACTIVITY_FAILED_TIME = int(os.environ.get('ACTIVITY_FAILED_TIME', 30))
+NOTIFICATION_DEFAULT_TTL = int(os.environ.get('NOTIFICATION_DEFAULT_TTL', 30))  # in seconds
 
 SERVICE_TIMEOUT = int(os.environ.get('SERVICE_TIMEOUT', 10))  # in seconds
+
+# Custom fields
+if REQUIRED_PROFILE_FIELDS := os.environ.get('REQUIRED_PROFILE_FIELDS', []):
+    REQUIRED_PROFILE_FIELDS = REQUIRED_PROFILE_FIELDS.split(',')
+
+if REQUIRED_CAMERA_FIELDS := os.environ.get('REQUIRED_CAMERA_FIELDS', []):
+    REQUIRED_CAMERA_FIELDS = REQUIRED_CAMERA_FIELDS.split(',')
+
+# JWT
+JWT_DECODE_SECRET = os.environ.get('JWT_DECODE_SECRET', 'zaq11qaz')
+JWT_ENCODE_SECRET = os.environ.get('JWT_ENCODE_SECRET', 'zaq11qaz')
+JWT_ALGORITHM = os.environ.get('JWT_ALGORITHM', 'HS256')
+JWT_SVC_NAME = os.environ.get('JWT_SVC_NAME', 'monolith-svc')
+
+ENCRYPTOR_SALT = os.environ.get('ENCRYPTOR_SALT', 'b84059cae7111dd0404c64677e148f691a95697a2e6ae7dc2c50daa68f2f5bf2')
+
+# A crutch for proper licensing
+GLOBAL_LICENSING_CACHE = {}
+VERIFY_LICENSE_DELTA = min(int(os.environ.get('VERIFY_LICENSE_DELTA', 60)), 3600)  # in seconds; max - 1 hour

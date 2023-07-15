@@ -28,7 +28,8 @@ class LocationLinkMutation:
     def add_camera_to_location(self, info: Info,
                                location_id: ID,
                                camera_id: Optional[ID]) -> LocationManageOutput:
-        manager = CameraManager(str(camera_id))
+        workspace_id = get_workspace_id(info=info)
+        manager = CameraManager(str(camera_id), workspace_id=str(workspace_id))
         label = LabelManager.get_label_by_id(label_id=location_id)
         ok = manager.add_camera_location(label=label)
 
@@ -38,7 +39,8 @@ class LocationLinkMutation:
     def delete_camera_from_location(self, info: Info,
                                     location_id: ID,
                                     camera_id: Optional[ID]) -> LocationManageOutput:
-        manager = CameraManager(str(camera_id))
+        workspace_id = get_workspace_id(info=info)
+        manager = CameraManager(str(camera_id), workspace_id=str(workspace_id))
         label = LabelManager.get_label_by_id(label_id=location_id)
         ok = manager.remove_camera_location(label=label)
 
@@ -70,12 +72,14 @@ class AgentMutation:
         return MutationResult(ok=ok)
 
     @strawberry.mutation(permission_classes=[IsHaveAccess, IsWorkspaceActive])
-    def change_agent(root, agent_id: ID, agent_data: AgentUpdateInput) -> AgentManageOutput:
-        camera = Camera.objects.get(agent=str(agent_id))
-        camera_manager = CameraManager(camera_id=str(camera.id))
+    def change_agent(root, info: Info, agent_id: ID, agent_data: AgentUpdateInput) -> AgentManageOutput:
+        workspace_id = get_workspace_id(info=info)
+
+        camera = Camera.objects.get(agent=str(agent_id), workspace_id=str(workspace_id))
+        camera_manager = CameraManager(camera_id=str(camera.id), workspace_id=str(workspace_id))
         with transaction.atomic():
             ok, agent = AgentManager.change_agent_title(agent_id=agent_id, title=agent_data.title)
-            camera_manager.change_camera_title(title=agent_data.title)
+            camera_manager.update_camera_info(info={'title': agent_data.title})
         return AgentManageOutput(ok=ok, agent=agent)
 
     @strawberry.mutation(permission_classes=[IsHaveAccess, IsAccessToken, IsWorkspaceActive])
@@ -103,7 +107,7 @@ class AgentMutation:
 
         with transaction.atomic():
             agent = AgentManager.create_agent(workspace=workspace, title=agent_data.title)
-            _ = CameraManager.create_camera(workspace=workspace, title=agent_data.title, agent=agent,
+            _ = CameraManager.create_camera(workspace=workspace, info={'title': agent_data.title}, agent=agent,
                                             standalone=standalone)
 
         return AgentCreateOutput(agent=agent,

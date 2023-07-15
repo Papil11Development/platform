@@ -9,7 +9,8 @@ from strawberry.types import Info
 from platform_lib.strawberry_auth.permissions import CombinedPermission, IsAccessToken, IsAuthenticated, \
     IsServiceToken, IsHaveAccess
 from platform_lib.utils import get_user, ApiError, type_desc, get_workspace_id
-from user_domain.api.v2.types import AnalyticsOutput, WorkspaceType, AccessOutput, UserType
+from user_domain.api.v2.types import AnalyticsOutput, WorkspaceType, AccessOutput, UserType, PlatformInfoType, \
+    WorkspaceInfoType
 from user_domain.models import Workspace, Access
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "main.settings")
@@ -47,6 +48,12 @@ class InternalQuery:
 @strawberry.type
 class Query:
 
+    @strawberry.field(permission_classes=[IsHaveAccess], description="Get information about workspace")
+    def workspace_info(self, info) -> WorkspaceInfoType:
+        workspace_id = get_workspace_id(info)
+
+        return Workspace.objects.get(id=workspace_id)
+
     @strawberry.field(permission_classes=[IsHaveAccess], description="Get links to analytics")
     def analytics(self, info) -> AnalyticsOutput:
         workspace_id = get_workspace_id(info)
@@ -72,3 +79,8 @@ class Query:
     )
     def me(self, info: Info) -> UserType:
         return get_user(info)  # noqa
+
+    @strawberry.field(permission_classes=[IsHaveAccess], description="Get information about platform")
+    def platform_information(self, info: Info) -> PlatformInfoType:
+        workspace_id = get_workspace_id(info)
+        return Workspace.objects.get(id=workspace_id)  # noqa

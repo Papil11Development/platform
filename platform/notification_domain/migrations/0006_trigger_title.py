@@ -24,7 +24,8 @@ def set_title(apps, schema_editor):
             continue
         targets = []
         for item in items:
-            targets += [target.get('uuid') for target in item.get('target') if target.get('type') == 'Label']
+            if item.get('target'):
+                targets += [target.get('uuid') for target in item['target'] if target.get('type') == 'Label']
         label_titles = Label.objects.filter(id__in=targets).values_list('title', flat=True)
         trigger.title = f'Trigger for watchlist {",".join(label_titles)}'
         trigger.save()

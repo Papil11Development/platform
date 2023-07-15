@@ -64,11 +64,13 @@ profile_info_scheme = {
                 "description": "Person's name",
                 "type": ["string", "null"],
                 "maxLength": 255,
+                "minLength": 1,
             },
             "birthday": {
                 "description": "Person's birthday",
                 "type": ["string", "null"],
                 "format": "date",
+                "minLength": 1,
             },
             "gender": {
                 "description": "Person's gender",
@@ -79,24 +81,28 @@ profile_info_scheme = {
                 "description": "Person's age",
                 "type": ["integer", "null"],
                 "minimum": 0,
+                "maximum": 300
             },
             "description": {
                 "description": "Person's description",
                 "type": ["string", "null"],
                 "maxLength": 255,
+                "minLength": 1,
             },
             "main_sample_id": {
                 "description": "The unique identifier for a person's sample with best quality",
                 "type": "string",
                 "format": "uuid",
+                "minLength": 1,
             },
             "avatar_id": {
                 "description": "Profile Avatar",
                 "type": ["string", "null"],
                 "format": "uuid",
+                "minLength": 1,
             },
         },
-    "additionalProperties": False,
+    "additionalProperties": True,
 }
 
 group_info_scheme = {
@@ -244,13 +250,14 @@ workspace_config_scheme = {
             "minimum": 0,
             "maximum": 1
         },
-        "sample_ttl": {"type": "integer"}
+        "sample_ttl": {"type": "integer"},
+        "activity_ttl": {"type": "integer"}
     },
     "required": ["is_active", "sample_ttl"],
     "additionalProperties": False
 }
 
-sample_meta_scheme = {
+activity_meta_scheme = {
     "type": "object",
     "properties": {
         "objects": {
@@ -368,6 +375,300 @@ sample_meta_scheme = {
                 },
                 'compression': {'type': 'string'}
             }
+        }
+    }
+}
+
+sample_meta_scheme = {
+    "type": "object",
+    "required": ["$image", "objects"],
+    "properties": {
+        "$image": {"$ref": "#/definitions/blob"},
+        "objects": {
+            "type": "array",
+            "items": {"$ref": "#/definitions/object_meta"},
+            "minimum": 1
+        }
+    },
+    "definitions": {
+        "object_meta": {
+            "type": "object",
+            "required": ["id", "class"],
+            "properties": {
+                "id": {
+                    "description": "Object ID unique within the sample",
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "class": {
+                    "description": "Object class name",
+                    "type": "string",
+                    "enum": ["face", "body"]
+                },
+                "confidence": {
+                    "description": "Object detection confidence",
+                    "$ref": "#/definitions/confidence"
+                },
+                "bbox": {
+                    "description": "Defines a rectangle region in normalized image coordinates"
+                                   " in the form of array [x1, y1, x2, y2],"
+                                   " where (x1, y1) is top-left corner and (x2, y2) is bottom-right corner",
+                    "type": "array",
+                    "minItems": 4,
+                    "maxItems": 4,
+                    "items": {"type": "number"}
+                },
+                "$crop_image": {"$ref": "#/definitions/blob"},
+                "fitter": {
+                    "type": "object",
+                    "required": ["fitter_type", "keypoints", "left_eye", "right_eye"],
+                    "properties": {
+                        "fitter_type": {
+                            "type": "string",
+                            "enum": ["fda"]
+                        },
+                        "keypoints": {
+                            "type": "array",
+                            "minItems": 63,
+                            "maxItems": 63,
+                            "items": {"type": "number"}
+                        },
+                        "left_eye": {
+                            "type": "array",
+                            "minItems": 2,
+                            "maxItems": 2,
+                            "items": {"type": "number"}
+                        },
+                        "right_eye": {
+                            "type": "array",
+                            "minItems": 2,
+                            "maxItems": 2,
+                            "items": {"type": "number"}
+                        },
+                    },
+                    "additionalProperties": False
+                },
+                "emotions": {
+                    "type": "array",
+                    "prefixItems": [
+                        {
+                            "type": "object",
+                            "required": ["confidence", "emotion"],
+                            "properties": {
+                                "confidence": {"$ref": "#/definitions/confidence"},
+                                "emotion": {
+                                    "const": "ANGRY"
+                                }
+                            },
+                            "additionalProperties": False
+                        },
+                        {
+                            "type": "object",
+                            "required": ["confidence", "emotion"],
+                            "properties": {
+                                "confidence": {"$ref": "#/definitions/confidence"},
+                                "emotion": {
+                                    "const": "DISGUSTED"
+                                }
+                            },
+                            "additionalProperties": False
+                        },
+                        {
+                            "type": "object",
+                            "required": ["confidence", "emotion"],
+                            "properties": {
+                                "confidence": {"$ref": "#/definitions/confidence"},
+                                "emotion": {
+                                    "const": "SCARED"
+                                }
+                            },
+                            "additionalProperties": False
+                        },
+                        {
+                            "type": "object",
+                            "required": ["confidence", "emotion"],
+                            "properties": {
+                                "confidence": {"$ref": "#/definitions/confidence"},
+                                "emotion": {
+                                    "const": "HAPPY"
+                                }
+                            },
+                            "additionalProperties": False
+                        },
+                        {
+                            "type": "object",
+                            "required": ["confidence", "emotion"],
+                            "properties": {
+                                "confidence": {"$ref": "#/definitions/confidence"},
+                                "emotion": {
+                                    "const": "NEUTRAL"
+                                }
+                            },
+                            "additionalProperties": False
+                        },
+                        {
+                            "type": "object",
+                            "required": ["confidence", "emotion"],
+                            "properties": {
+                                "confidence": {"$ref": "#/definitions/confidence"},
+                                "emotion": {
+                                    "const": "SAD"
+                                }
+                            },
+                            "additionalProperties": False
+                        },
+                        {
+                            "type": "object",
+                            "required": ["confidence", "emotion"],
+                            "properties": {
+                                "confidence": {"$ref": "#/definitions/confidence"},
+                                "emotion": {
+                                    "const": "SURPRISED"
+                                }
+                            },
+                            "additionalProperties": False
+                        },
+                    ],
+                    "minItems": 7,
+                    "maxItems": 7,
+                    "items": False
+                },
+                "mask": {
+                    "type": "object",
+                    "required": ["confidence", "value"],
+                    "properties": {
+                        "confidence": {"$ref": "#/definitions/confidence"},
+                        "value": {"type": "boolean"}
+                    },
+                    "additionalProperties": False
+                },
+                "templates": {
+                    "type": "object",
+                    'patternProperties': {
+                        "(\$template)\d+v\d+": {"$ref": "#/definitions/blob"}  # noqa
+                    },
+                    "minProperties": 1,
+                    "additionalProperties": False
+                },
+                "gender": {
+                    "type": "string",
+                    "enum": ["MALE", "FEMALE"]
+                },
+                "age": {
+                    "type": "integer"
+                },
+                "angles": {
+                    "type": "object",
+                    "required": ["yaw", "roll", "pitch"],
+                    "properties": {
+                        "yaw": {"type": "number"},
+                        "roll": {"type": "number"},
+                        "pitch": {"type": "number"},
+                    },
+                    "additionalProperties": False
+                },
+                "liveness": {
+                    "type": "object",
+                    "required": ["confidence", "value"],
+                    "properties": {
+                        "confidence": {"$ref": "#/definitions/confidence"},
+                        "value": {
+                            "type": "string",
+                            "enum": ["FAKE", "REAL"]
+                        }
+                    },
+                    "additionalProperties": False
+                },
+                "quality": {
+                    "type": "object",
+                    "required": ["qaa"],
+                    "properties": {
+                        "qaa": {
+                            "type": "object",
+                            "required": [
+                                "total_score",
+                                "is_sharp",
+                                "sharpness_score",
+                                "is_evenly_illuminated",
+                                "illumination_score",
+                                "no_flare",
+                                "is_left_eye_opened",
+                                "left_eye_openness_score",
+                                "is_right_eye_opened",
+                                "right_eye_openness_score",
+                                "is_rotation_acceptable",
+                                "max_rotation_deviation",
+                                "not_masked",
+                                "not_masked_score",
+                                "is_neutral_emotion",
+                                "neutral_emotion_score",
+                                "is_eyes_distance_acceptable",
+                                "eyes_distance",
+                                "is_margins_acceptable",
+                                "margin_outer_deviation",
+                                "margin_inner_deviation",
+                                "is_not_noisy",
+                                "noise_score",
+                                "watermark_score",
+                                "has_watermark",
+                                "dynamic_range_score",
+                                "is_dynamic_range_acceptable",
+                                "background_uniformity_score",
+                                "is_background_uniform",
+                            ],
+                            "properties": {
+                                "total_score": {"type": "integer"},
+                                "is_sharp": {"type": "boolean"},
+                                "sharpness_score": {"type": "integer"},
+                                "is_evenly_illuminated": {"type": "boolean"},
+                                "illumination_score": {"type": "integer"},
+                                "no_flare": {"type": "boolean"},
+                                "is_left_eye_opened": {"type": "boolean"},
+                                "left_eye_openness_score": {"type": "integer"},
+                                "is_right_eye_opened": {"type": "boolean"},
+                                "right_eye_openness_score": {"type": "integer"},
+                                "is_rotation_acceptable": {"type": "boolean"},
+                                "max_rotation_deviation": {"type": "integer"},
+                                "not_masked": {"type": "boolean"},
+                                "not_masked_score": {"type": "integer"},
+                                "is_neutral_emotion": {"type": "boolean"},
+                                "neutral_emotion_score": {"type": "integer"},
+                                "is_eyes_distance_acceptable": {"type": "boolean"},
+                                "eyes_distance": {"type": "integer"},
+                                "is_margins_acceptable": {"type": "boolean"},
+                                "margin_outer_deviation": {"type": "integer"},
+                                "margin_inner_deviation": {"type": "integer"},
+                                "is_not_noisy": {"type": "boolean"},
+                                "noise_score": {"type": "integer"},
+                                "watermark_score": {"type": "integer"},
+                                "has_watermark": {"type": "boolean"},
+                                "dynamic_range_score": {"type": "integer"},
+                                "is_dynamic_range_acceptable": {"type": "boolean"},
+                                "background_uniformity_score": {"type": "integer"},
+                                "is_background_uniform": {"type": "boolean"},
+                            },
+                            "additionalProperties": False
+                        },
+                    },
+                    "additionalProperties": False
+                }
+            }
+        },
+        "blob": {
+            "anyOf": [
+                {"type": "string"},
+                {
+                    "type": "object",
+                    "required": ["id"],
+                    "properties": {
+                        "id": {"type": "string", "format": "uuid"}
+                    },
+                    "additionalProperties": False
+                }
+            ]
+        },
+        "confidence": {
+            "type": "number"
         }
     }
 }

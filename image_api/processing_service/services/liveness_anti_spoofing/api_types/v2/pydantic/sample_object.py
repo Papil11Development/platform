@@ -1,0 +1,16 @@
+from typing import List, Literal
+from pydantic import BaseModel, Extra, Field
+
+
+class Liveness(BaseModel):
+    confidence: float = Field(example=0.5067038536071777, description='Confidence')
+    value: Literal['real', 'fake'] = Field(example='real', description='Liveness value')
+
+
+class SampleObject(BaseModel):
+    id: int = Field(description='The ordinal number of the face in the image', ge=0)
+    class_: str = Field(alias='class', example='face', description='Object class name')
+    liveness: Liveness
+
+    class Config:
+        extra = Extra.allow

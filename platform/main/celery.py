@@ -31,6 +31,23 @@ app.conf.beat_schedule = {
         'task': 'collector_domain.tasks.agent_status_checker',
         'schedule': settings.AGENT_STATUS_CHECK_PERIOD,
         'args': ()
+    },
+    'activity-status-checker': {
+        'task': 'data_domain.tasks.finalize_dangling_activites',
+        'schedule': settings.ACTIVITY_STATUS_CHECK_PERIOD,
+        'args': ()
+    },
+    'sample-retention-policy': {
+        'task': 'data_domain.tasks.sample_retention_policy',
+        'schedule': crontab(minute=0, hour=12, day_of_week=0)
+    },
+    'activity-retention-policy': {
+        'task': 'data_domain.tasks.activity_retention_policy',
+        'schedule': crontab(minute=0, hour=12, day_of_week=0)
+    },
+    'matcher-indexes-commit': {
+        'task': 'data_domain.tasks.commit_index',
+        'schedule': settings.INDEX_UPDATE_PERIOD
     }
 }
 
@@ -42,7 +59,10 @@ app.conf.task_routes = {
     re.compile(r'^data_domain\.tasks\.(?!elastic_(drop|push|manager)$)(.*)'): {
         'queue': settings.REIDENTIFICATION_QUEUE
     },
+    'data_domain.tasks.finalize_dangling_activites': {'queue': settings.ACTIVITY_QUEUE},
     'person_domain.tasks.duplicate_persons': {'queue': settings.QA_QUEUE},
+    'data_domain.tasks.commit_index': {'queue': settings.MATCHER_QUEUE},
+    'data_domain.tasks.delete_index': {'queue': settings.MATCHER_QUEUE},
 }
 
 
@@ -76,14 +96,11 @@ if not settings.IS_ON_PREMISE:
             'task': 'data_domain.tasks.clean_deactivated_workspaces',
             'schedule': timedelta(minutes=10),
             'args': ()
-        },
-        'sample-retention-policy': {
-            'task': 'data_domain.tasks.sample_retention_policy',
-            'schedule': crontab(minute=0, hour=12, day_of_week=0)
-        },
+        }
     })
 
     app.conf.task_routes.update({
+        'data_domain.tasks.activity_retention_policy': {'queue': settings.DATA_PURGE_QUEUE},
         'data_domain.tasks.sample_retention_policy': {'queue': settings.DATA_PURGE_QUEUE},
         'data_domain.tasks.clean_deactivated_workspaces': {'queue': settings.DATA_PURGE_QUEUE},
         'licensing.tasks.*': {'queue': settings.LICENSING_QUEUE},

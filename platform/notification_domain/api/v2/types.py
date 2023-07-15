@@ -1,25 +1,20 @@
 import datetime
-import uuid
-from datetime import timedelta
 from enum import Enum
 from typing import Optional, List
 from uuid import UUID
 
 import strawberry
 import strawberry_django
-from django.apps import apps
 from django.conf import settings
-from django.db.models import Q, F, QuerySet
+from django.db.models import Q
 from strawberry import ID, auto
 from strawberry.arguments import UNSET
 
 from notification_domain.managers import EndpointManager
 from notification_domain.models import Endpoint, Notification
-from label_domain.managers import LabelManager
-from collector_domain.managers import CameraManager
 from platform_lib.managers import TriggerMetaManager
 from platform_lib.types import MutationResult, JSONString, FilterLookupCustom
-from platform_lib.utils import get_collection, from_dict_to_class, FilterByWorkspaceMixin, get_workspace_id
+from platform_lib.utils import get_collection, from_dict_to_class, FilterByWorkspaceMixin
 
 
 @strawberry.enum
@@ -142,13 +137,13 @@ class NotificationFilter:
         if self.trigger_id is None:
             return queryset
         else:
-            return queryset.filter(meta__trigger_id=str(self.trigger_id))
+            return queryset.filter(meta__trigger__id=str(self.trigger_id))
 
     def filter_profile_id(self, queryset):
         if self.profile_id is None:
             return queryset
         else:
-            return queryset.filter(meta__profile_id=str(self.profile_id))
+            return queryset.filter(meta__profile__id=str(self.profile_id))
 
     def filter_type(self, queryset):
         if self.type is None:
@@ -160,7 +155,7 @@ class NotificationFilter:
         if self.profile_group_title is None:
             return queryset
         else:
-            return queryset.filter(meta__profile_group_title=self.profile_group_title)
+            return queryset.filter(meta__matched_profile_groups__0__title=self.profile_group_title)
 
 
 @strawberry_django.ordering.order(Notification)
@@ -179,40 +174,37 @@ class NotificationOutput(FilterByWorkspaceMixin):
     is_viewed: bool = strawberry.field(description="Determines whether the notification has been viewed")
     last_modified: datetime.datetime = strawberry.field(description="Notification last modified date")
 
-    def optimize_queryset_by_custom_joins(self, queryset, info, **kwargs) -> QuerySet:
-        profile_model = apps.get_model('person_domain', 'Profile')
-        profile_ids = map(uuid.UUID, queryset.values_list('meta__profile_id', flat=True))
-        profiles = profile_model.objects.filter(id__in=profile_ids)
+    # def optimize_queryset_by_custom_joins(self, queryset, info, **kwargs) -> QuerySet:
+    #     profile_model = apps.get_model('person_domain', 'Profile')
+    #     profile_ids = map(uuid.UUID, queryset.values_list('meta__profile_id', flat=True))
+    #     profiles = profile_model.objects.filter(id__in=profile_ids)
+    #
+    #     for notif in queryset:
+    #         notif.profile = next(
+    #             filter(lambda profile: notif.meta.get('profile_id') == str(profile.id), profiles), None
+    #         )
+    #
+    #     return queryset
 
-        for notif in queryset:
-            notif.profile = next(
-                filter(lambda profile: notif.meta.get('profile_id') == str(profile.id), profiles), None
-            )
-
-        return queryset
-
-    def get_queryset(self, queryset, info, **kwargs) -> QuerySet:
-        queryset = FilterByWorkspaceMixin.get_queryset(self, queryset, info, **kwargs)
-
-        time_inaccuracy = 0.2
-
-        notification_filter = ~Q(meta__type='location_overflow',
-                                 last_modified__lt=F('creation_date') + timedelta(seconds=time_inaccuracy))
-
-        queryset = queryset.filter(notification_filter)
-
-        return queryset
+    # def get_queryset(self, queryset, info, **kwargs) -> QuerySet:
+    #     queryset = FilterByWorkspaceMixin.get_queryset(self, queryset, info, **kwargs)
+    #
+    #     time_inaccuracy = 0.2
+    #
+    #     notification_filter = ~Q(meta__type='location_overflow',
+    #                              last_modified__lt=F('creation_date') + timedelta(seconds=time_inaccuracy))
+    #
+    #     queryset = queryset.filter(notification_filter)
+    #
+    #     return queryset
 
     @strawberry.field(description="Notification creation date")
     def creation_date(root) -> datetime.datetime:
-        if root.meta.get('type') == 'location_overflow':
-            return root.creation_date + timedelta(seconds=root.meta['lifetime'])  # noqa
-        else:
-            return root.creation_date  # noqa
+        return root.creation_date  # noqa
 
     @strawberry.field(description="Title of camera")
     def camera_title(root) -> Optional[str]:
-        return CameraManager.get_camera_title(root.meta.get('camera_id'))
+        return root.meta['camera'].get('title')
 
     @strawberry.field(description="Notification sending status to different endpoints")
     def endpoint_statuses(root) -> Optional[List[EndpointStatusOutput]]:
@@ -221,76 +213,58 @@ class NotificationOutput(FilterByWorkspaceMixin):
                 for key, value in root.meta.get("statuses", {}).items()]
 
     @strawberry.field(description="ID of camera")
-    def camera_id(root) -> Optional[ID]:
-        return root.meta.get('camera_id')
+    def camera_id(root) -> ID:
+        return root.meta['camera']['id']
 
     @strawberry.field(description="Type of notification")
     def type(root) -> str:
-        return root.meta.get('type')
+        return root.meta['type']
 
     @strawberry.field(description="ID of the trigger which notification belongs to")
-    def trigger_id(root) -> Optional[ID]:
-        return root.meta.get('trigger_id')
+    def trigger_id(root) -> ID:
+        return root.meta['trigger']['id']
 
     @strawberry.field(description="ID of the activity associated with the notification")
     def activity_id(root) -> Optional[ID]:
-        return root.meta.get('activity_id')
+        return root.meta.get('activity', {}).get('id')
 
     # TODO: Add return profile object instead of special fields (avatar_id, name, description and etc)
     @strawberry.field(description="ID of the profile's avatar")
     def avatar_id(root) -> Optional[ID]:
-        if root.profile:
-            return root.profile.info.get('avatar_id')
-        return None
+        return root.meta.get('profile', {}).get('avatar_id')
 
     @strawberry.field(description="Profile's name")
     def name(root) -> Optional[str]:
-        if root.profile:
-            return root.profile.info.get('name')
-        return None
+        return root.meta.get('profile', {}).get('name')
 
     @strawberry.field(description="Profile's description")
     def description(root) -> Optional[str]:
-        if root.profile:
-            return root.profile.info.get('description')
-        return None
+        return root.meta.get('profile', {}).get('description')
 
     @strawberry.field(description="ID of the profile's realtime face photo")
     def realtime_face_photo_id(root) -> Optional[str]:
-        return root.meta.get('realtime_face_photo_id')
+        return root.meta.get('activity', {}).get('face_photo_id')
 
     @strawberry.field(description="ID of the profile's realtime body photo")
     def realtime_body_photo_id(root) -> Optional[str]:
-        return root.meta.get('realtime_body_photo_id')
+        return root.meta.get('activity', {}).get('body_photo_id')
 
     @strawberry.field(description="ID of the profile for whom the notification was created")
     def profile_id(root) -> Optional[ID]:
-        return root.meta.get('profile_id')
+        return root.meta.get('profile', {}).get('id')
 
     @strawberry.field(description="ID of Profile Group associated with the profile")
     def profile_group_id(root) -> Optional[ID]:
-        return root.meta.get('profile_group_id')
+        return root.meta.get('matched_profile_groups', [{}])[0].get('id')
 
     @strawberry.field(description="Title of Profile Group associated with the profile")
     def profile_group_title(root) -> Optional[str]:
-        profile_group_id = root.meta.get('profile_group_id')
-        profile_group_title, _ = LabelManager.get_label_data(profile_group_id)
-        return profile_group_title
+        return root.meta.get('matched_profile_groups', [{}])[0].get('title')
 
     @strawberry.field(description="Color of Profile Group associated with the profile at the time of "
                                   "notification creation")
     def profile_group_color(root) -> Optional[str]:
-        profile_group_id = root.meta.get('profile_group_id')
-        _, profile_group_info = LabelManager.get_label_data(profile_group_id)
-        return profile_group_info.get('color')
-
-    @strawberry.field(description="Limiting the number of people in a location")
-    def limit(root) -> Optional[int]:
-        return root.meta.get('limit')
-
-    @strawberry.field(description="Current number of people in the location")
-    def current_count(root) -> Optional[int]:
-        return root.meta.get('current_count')
+        return root.meta.get('matched_profile_groups', [{}])[0].get('color')
 
 
 @strawberry.type(description="Information about updated endpoint")

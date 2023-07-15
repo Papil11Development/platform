@@ -1,0 +1,12 @@
+{
+    "block_config": {
+        "unit_type": "OBJECT_DETECTOR",
+        "model_path": "/face_sdk/share/objectdetectors/det-object.enc",
+        "ONNXRuntime": {
+            "library_path": "/face_sdk/lib"
+        }
+    },
+    "meta_config":{
+        "conversion_needle": "RGB"
+    }
+}

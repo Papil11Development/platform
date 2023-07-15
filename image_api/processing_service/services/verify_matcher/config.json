@@ -1,0 +1,16 @@
+{
+    "block_config": {
+        "unit_type": "_VERIFY_MATCHER",
+        "model_path": "",
+        "recognizer_config": "method12v1000_recognizer.xml",
+        "sdk_path": "/face_sdk"
+    },
+    "meta_config":{
+        "conversion_needle": "RGB",
+        "versions": {
+            "v1": {},
+            "v2": {}
+        }
+    },
+    "dependencies": ["face-detector-template-extractor"]
+}

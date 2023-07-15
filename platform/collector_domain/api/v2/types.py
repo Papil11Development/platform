@@ -1,11 +1,12 @@
 import datetime
 from typing import List, Optional
+from uuid import UUID
 import strawberry
 from strawberry import ID
 from strawberry.types import Info
 
 from collector_domain.managers import AgentManager
-from platform_lib.types import JSON, MutationResult
+from platform_lib.types import JSON, MutationResult, ExtraFieldInput
 from platform_lib.utils import get_collection
 from django.db.models import Q
 
@@ -24,7 +25,25 @@ class AgentUpdateInput:
     title: str = strawberry.field(default="", description="Agent title")
 
 
+@strawberry.input(description="Information needed for camera creation")
+class CameraInput:
+    fields: Optional[List[ExtraFieldInput]] = strawberry.field(default=None)
+    agent_id: Optional[ID] = strawberry.field(description="ID of the agent to link the camera to", default=None)
+
+
 # model interpretation types
+
+@strawberry.type(description="Information about the camera that is the information collection tool.")
+class CameraOutput:
+    description_name = "cameras"
+
+    @strawberry.field(description="Info about camera")
+    def info(self) -> JSON:
+        return self.info
+
+    id: ID
+    creation_date: datetime.datetime = strawberry.field(description="Camera creation date")
+    last_modified: datetime.datetime = strawberry.field(description="Last camera modification date")
 
 
 @strawberry.type(description="Information about the agent that is the information collection tool,"
@@ -38,7 +57,11 @@ class AgentOutput:
 
     @strawberry.field(description='Ids of agent cameras')
     def cameras_ids(root, info: Info) -> Optional[List[ID]]:
-        return [camera.id for camera in root.cameras.all(Q(is_active__in=[True, False]))]
+        return [camera.id for camera in root.cameras.all()]
+
+    @strawberry.field(description='Agent cameras')
+    def cameras(root, info: Info) -> Optional[List[CameraOutput]]:
+        return root.cameras.all()
 
     @strawberry.field(description='Agent title')
     def title(root, info: Info) -> Optional[str]:
@@ -64,11 +87,23 @@ class AgentOutput:
     last_modified: datetime.datetime = strawberry.field(description="Last agent modification date")
 
 
+@strawberry.type(description="Information about agent")
+class AgentInfo(AgentOutput):
+    @strawberry.field(description='Agent workspace id')
+    def workspace_id(root) -> ID:
+        return root.workspace_id
+
 # output types
+
 
 @strawberry.type(description="Information about the updated agent")
 class AgentManageOutput(MutationResult):
     agent: AgentOutput = strawberry.field(description="Agent object")
+
+
+@strawberry.type(description="Information about the updated camera")
+class CameraManageOutput(MutationResult):
+    camera: CameraOutput = strawberry.field(description="Camera object")
 
 
 @strawberry.type(description="Information on the agent created, the next payment date and the value of the payment"
@@ -78,10 +113,19 @@ class AgentCreateOutput(AgentManageOutput):
     writeoff_date: Optional[str] = strawberry.field(description="Next payment date")
 
 
+@strawberry.type(description="Workspace collector settings")
+class CollectorSettingsType:
+    id: UUID
+    camera_fields: JSON
+
+
 # collections
 
 AgentsCollection = strawberry.type(get_collection(AgentOutput, 'AgentsCollection'),
                                    description="Filtered agent collection and total agents count")
+
+CamerasCollection = strawberry.type(get_collection(CameraOutput, 'CamerasCollection'),
+                                    description="Filtered camera collection and total cameras count")
 
 # field maps
 

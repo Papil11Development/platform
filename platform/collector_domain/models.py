@@ -1,8 +1,8 @@
 import uuid
-
 from django.db import models, transaction
 from django.dispatch import receiver
 from django.db.models.signals import pre_delete
+from django.contrib.postgres.fields import ArrayField
 
 from label_domain.models import Label
 from user_domain.models import Workspace
@@ -35,8 +35,8 @@ class Agent(models.Model, ModelMixin):
 class Camera(models.Model, ModelMixin):
     id = models.UUIDField(primary_key=True, unique=True, default=uuid.uuid4, editable=False)
 
-    title = models.CharField(max_length=500, default='')
-    agent = models.ForeignKey(Agent, related_name='cameras', on_delete=models.CASCADE, null=False)
+    info = models.JSONField(default=dict, help_text="Profile's info")
+    agent = models.ForeignKey(Agent, related_name='cameras', on_delete=models.CASCADE, null=True)
     workspace = models.ForeignKey(Workspace, related_name='cameras', on_delete=models.CASCADE, null=False)
     locations = models.ManyToManyField(Label, related_name="cameras", through="Location")
 
@@ -110,6 +110,23 @@ class AgentIndexEvent(models.Model):
         indexes = [
             models.Index(fields=['creation_date'])
         ]
+
+
+class CollectorSettings(models.Model):
+
+    id = models.UUIDField(primary_key=True, unique=True, default=uuid.uuid4, editable=False)
+    workspace_id = models.UUIDField(null=False, editable=False)
+
+    camera_fields = ArrayField(models.CharField(max_length=32), default=list)
+
+    last_modified = models.DateTimeField(auto_now=True, null=True, blank=True)
+    creation_date = models.DateTimeField(auto_now_add=True, null=True, blank=True)
+
+    objects = models.Manager()
+
+    class Meta:
+        db_table = 'collector_settings'
+        verbose_name_plural = 'CollectorSettings'
 
 
 @receiver(pre_delete, sender=Agent)

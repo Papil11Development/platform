@@ -1,0 +1,31 @@
+{
+    "block_config": {
+        "unit_type": "_FACE_DETECTOR_LIVENESS_ESTIMATOR",
+        "model_path": "",
+        "capturer_config": "common_capturer_uld_fda.xml",
+        "liveness_config": "liveness_2d_estimator_v2.xml",
+        "ONNXRuntime": {
+            "library_path": "/face_sdk/lib"
+        }
+    },
+    "meta_config": {
+        "conversion_needle": "RGB",
+        "versions": {
+            "v1": {},
+            "v2": {
+                "args": {
+                    "template_version": {
+                        "type": {
+                            "format": "enum_from_env",
+                            "value": "RECOGNIZER_VERSION"
+                        },
+                        "synopsis": {
+                            "description": "Version of templates to process",
+                            "example": "12v1000"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

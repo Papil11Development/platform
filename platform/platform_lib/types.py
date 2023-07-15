@@ -22,6 +22,11 @@ class MutationResult:
     ok: bool = strawberry.field(description="Indicator of mutation success")
 
 
+@strawberry.type
+class FieldsModifyResult(MutationResult):
+    fields: List[str] = strawberry.field(description="List of current entity fields")
+
+
 @strawberry.enum
 class WithArchived(Enum):
     archived = 'archived'
@@ -43,6 +48,14 @@ JSON = strawberry.scalar(
     serialize=lambda v: v,
     parse_value=lambda v: v,
 )
+
+Value = strawberry.scalar(
+    NewType("Value", object),
+    description="The `Value` scalar type saves the original type for the passed value",
+    serialize=lambda v: v,
+    parse_value=lambda v: v,
+)
+
 
 CustomBinaryType = strawberry.scalar(
     NewType("CustomBinaryType", bytes),
@@ -73,6 +86,17 @@ def parse_literal_custom_binary_type(node):
             return node.value
         except ValidationError:
             return base64.b64decode(node.value)
+
+
+@strawberry.input
+class ModifyExtraField:
+    name: str
+
+
+@strawberry.input
+class ExtraFieldInput:
+    name: str
+    value: Optional[Value]
 
 
 @strawberry.type

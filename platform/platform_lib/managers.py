@@ -10,7 +10,7 @@ import json
 from django.core.cache import cache
 
 from platform_lib.exceptions import KibanaError
-from platform_lib.validation.schemes import trigger_meta_scheme, sample_meta_scheme
+from platform_lib.validation.schemes import trigger_meta_scheme, activity_meta_scheme
 
 
 class BaseProcessManager:
@@ -162,7 +162,7 @@ class BaseProcessManager:
         return process.get('finalized', True)
 
     @classmethod
-    def get_process_timeinterval(cls, process: Dict) -> Tuple[int, int]:
+    def get_process_timeinterval(cls, process: Dict) -> Tuple[Optional[str], Optional[str]]:
         """
         Get process time interval
 
@@ -173,10 +173,10 @@ class BaseProcessManager:
 
         Returns
         -------
-        Tuple[int, int]
+        Tuple[Optional[str], Optional[str]]
             List of two values. First is start time, second is end time.
         """
-        timeinterval = process.get('time_interval')
+        timeinterval = process.get('time_interval', [None, None])
 
         return timeinterval[0], timeinterval[1]
 
@@ -264,12 +264,12 @@ class RawProcessManager(BaseProcessManager):
                 return o
 
         try:
-            jsonschema.validate(meta, sample_meta_scheme)
+            jsonschema.validate(meta, activity_meta_scheme)
         except jsonschema.ValidationError:
             try:
                 # bson doesn't decode numbers therefore try to decode meta data
                 s = {k: json_decoder(v) for k, v in meta.items()}
-                jsonschema.validate(s, sample_meta_scheme)
+                jsonschema.validate(s, activity_meta_scheme)
             except Exception:
                 return False
         return True
@@ -350,7 +350,8 @@ class RawProcessManager(BaseProcessManager):
     def substitute_bsms(cls, meta: Dict, bsms: List) -> Dict:
 
         def function(key, value, element, bsms):
-            element[key] = bsms[value]
+            if isinstance(value, int):
+                element[key] = bsms[value]
 
         cls._iterate_through_process(meta, function, function_extra={"bsms": bsms}, only_bsm=True)
 
@@ -374,6 +375,17 @@ class ActivityProcessManager(BaseProcessManager):
         activity_processes = activity_data['processes']
         super().__init__(activity_processes)
         assert len(self.get_human_processes()) == 1, "Wrong activity. To many human processes"
+
+    @classmethod
+    def get_blob_items(cls, process: Dict) -> List[Tuple[str, Union[int, dict]]]:
+        blob_ids = []
+
+        def function(key, value, element, result_value):
+            result_value.append((key, value))
+
+        cls._iterate_through_process(process, function, function_extra={"result_value": blob_ids}, only_bsm=True)
+
+        return blob_ids
 
     def get_age_gender(self) -> Tuple[Optional[int], Optional[str]]:
         face_processes = self.get_face_processes()
@@ -402,6 +414,15 @@ class ActivityProcessManager(BaseProcessManager):
 
         return body_info.get('$best_shot')
 
+    def get_template(self, template_version: str) -> Optional[Dict]:
+        face_processes = self.get_face_processes()
+        if len(face_processes) == 0:
+            return None
+
+        face_info = self.get_process_info(face_processes[0])
+
+        return face_info.get(f'${template_version}')
+
     def get_human_process(self) -> Dict:
         return self.get_human_processes()[0]
 
@@ -410,7 +431,7 @@ class ActivityProcessManager(BaseProcessManager):
 
         return self.is_process_finalized(human)
 
-    def get_human_timeinterval(self) -> Tuple[int, int]:
+    def get_human_timeinterval(self) -> Tuple[Optional[str], Optional[str]]:
         return self.get_process_timeinterval(self.get_human_process())
 
     def get_person_id(self) -> Optional[str]:
@@ -422,6 +443,19 @@ class ActivityProcessManager(BaseProcessManager):
             blob_ids += self._get_blob_ids(process)
 
         return blob_ids
+
+    def get_template_ids(self):
+        template_ids = []
+
+        def function(key, value, element, result_value):
+            if 'template' in key:
+                result_value.append(value['id'])
+
+        for process in self.processes:
+            self._iterate_through_process(process, function, function_extra={'result_value': template_ids},
+                                          only_bsm=True)
+
+        return template_ids
 
 
 class TriggerMetaManager:

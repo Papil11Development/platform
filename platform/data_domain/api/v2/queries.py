@@ -1,24 +1,28 @@
 import base64
-import requests
+from json import JSONDecodeError
 from typing import List, Optional
 
+import requests
+import strawberry
 from django.apps import apps
 from django.conf import settings
-
-import strawberry
 from strawberry import ID
 from strawberry.types import Info
 
-from data_domain.api.v2.types import MatchResult, SearchType, ActivityOutput, ActivityOrdering, ActivityFilter
-from data_domain.models import Sample, BlobMeta
-from platform_lib.exceptions import BadInputDataException, InternalException
-from platform_lib.types import CustomBinaryType, JSON, EyesInput, CountList
-from platform_lib.strawberry_auth.permissions import IsHaveAccess, IsWorkspaceActive
-from platform_lib.utils import get_workspace_id, get_token, SampleObjectsName, validate_image,\
-    extract_pupils, StrawberryDjangoCountList
-
+from data_domain.api.utils import check_search_input_data, get_templates
+from data_domain.api.v2.types import (ActivityFilter, ActivityOrdering,
+                                      ActivityOutput, ActivitySearchType,
+                                      MatchResult, SearchType)
 from data_domain.managers import SampleManager
-from data_domain.matcher import MatcherAPI
+from data_domain.matcher import ActivityMatcherAPI, MatcherAPI
+from data_domain.models import BlobMeta, Sample
+from platform_lib.exceptions import BadInputDataException, InternalException
+from platform_lib.strawberry_auth.permissions import (IsHaveAccess,
+                                                      IsWorkspaceActive)
+from platform_lib.types import JSON, CountList, CustomBinaryType, EyesInput
+from platform_lib.utils import (SampleObjectsName, StrawberryDjangoCountList,
+                                extract_pupils, get_workspace_id,
+                                validate_image)
 
 workspace_model = apps.get_model('user_domain', 'Workspace')
 
@@ -40,11 +44,11 @@ class Query:
         if sum(map(bool, [source_sample_id, source_sample_data, source_image])) != 1:
             raise BadInputDataException("0x963fb254")
 
-        token = get_token(info)
         workspace_id = get_workspace_id(info=info)
         objects_key = f'objects@{SampleObjectsName.PROCESSING_CAPTURER}'
-        template_version = workspace_model.objects.get(id=workspace_id).config.get('template_version',
-                                                                                   settings.DEFAULT_TEMPLATES_VERSION)
+        template_version = workspace_model.objects.get(id=workspace_id).config.get(
+            'template_version', settings.DEFAULT_TEMPLATES_VERSION
+        )
 
         # GET TEMPLATE BLOBS
         target_sample = Sample.objects.get(id=target_sample_id)
@@ -65,8 +69,10 @@ class Query:
             try:
                 template_id = source_template.get('id')
                 source_blob = BlobMeta.objects.select_related('blob').get(id=template_id).blob.data.tobytes()
+                match_templates.append(base64.standard_b64encode(source_blob).decode())
             except AttributeError:
-                pass
+                # source_template is already base64
+                match_templates.append(source_template)
 
         else:
             validate_image(source_image)
@@ -76,24 +82,33 @@ class Query:
 
         assert len(match_templates) == 2, "One or both samples have an invalid format"
 
-        # SEND REQUEST
-        data = {
-            f'template_{idx}': {f"${template_version}": template}
-            for idx, template in enumerate(match_templates, 1)
-        }
-        response = requests.post(f'{settings.IMAGE_API_URL}/verify/sample', json=data, headers={'TOKEN': token})
+        proc_objects = []
+        for templ in match_templates:
+            proc_objects.append({"$template": templ, "class": "face"})
+
+        response = requests.post(
+            f'{settings.VERIFY_MATCHER_SERVICE_URL}/process/sample',
+            json={"objects": proc_objects})
+
+        try:
+            result_json = response.json()
+        except (ValueError, TypeError, JSONDecodeError):
+            raise InternalException('0x176cbb31', response.content)
+
         if response.status_code != 200:
-            try:
-                err = response.json()['detail']
-            except AttributeError:
-                err = response.content
+            if (detail := result_json.get('detail')) is not None:
+                err = detail
+            else:
+                err = result_json
+
             raise InternalException('0x176cbb31', err)
-        return MatchResult(**response.json())
+
+        return MatchResult(**result_json['verification'])
 
     @strawberry.field(permission_classes=[IsHaveAccess, IsWorkspaceActive],
                       description="Search similar people in a workspace based on images, sample data, or sample IDs" +
                                   (". If a found human doesn't have a profile in system, profile output will be 'null'."
-                                   if not settings.ENABLE_PROFILE_AUTOGENERATION else ''))
+                      if not settings.ENABLE_PROFILE_AUTOGENERATION else ''))
     def search(self, info: Info,
                source_sample_ids: Optional[List[ID]] = None,
                source_sample_data: Optional[JSON] = None,
@@ -102,19 +117,17 @@ class Query:
                confidence_threshold: Optional[float] = 0.0,
                max_num_of_candidates_returned: Optional[int] = 5) -> List[SearchType]:
 
-        if sum(map(bool, [source_sample_ids, source_sample_data, source_image])) != 1:
-            raise BadInputDataException("0x963fb254")
-
-        if confidence_threshold < 0 or confidence_threshold > 1:
-            raise BadInputDataException("0xf47f116a")
-
-        if max_num_of_candidates_returned < 1 or max_num_of_candidates_returned > 100:
-            raise BadInputDataException("0xf8be6762")
+        check_search_input_data(**locals())
 
         workspace_id = get_workspace_id(info=info)
-        objects_key = f'objects@{SampleObjectsName.PROCESSING_CAPTURER}'
+        index_key = scope or workspace_id
         template_version = workspace_model.objects.get(id=workspace_id).config.get('template_version',
                                                                                    settings.DEFAULT_TEMPLATES_VERSION)
+        templates = get_templates(template_version, source_sample_ids, source_sample_data, source_image)
+        objects_key = f'objects@{SampleObjectsName.PROCESSING_CAPTURER}'
+        template_version = workspace_model.objects.get(id=workspace_id).config.get(
+            'template_version', settings.DEFAULT_TEMPLATES_VERSION
+        )
 
         if source_sample_ids:
             samples = sorted(Sample.objects.filter(id__in=source_sample_ids),
@@ -150,6 +163,30 @@ class Query:
                                            templates,
                                            nearest_count=max_num_of_candidates_returned,
                                            score=confidence_threshold)
+
+        return search_results  # noqa
+
+    @strawberry.field(permission_classes=[IsHaveAccess, IsWorkspaceActive],
+                      description="Search similar activity in a workspace based on images, sample data, or sample IDs")
+    def search_in_activities(self, info: Info,
+                             source_sample_ids: Optional[List[ID]] = None,
+                             source_sample_data: Optional[JSON] = None,
+                             source_image: Optional[CustomBinaryType] = None,
+                             confidence_threshold: Optional[float] = 0.0,
+                             max_num_of_candidates_returned: Optional[int] = 5) -> List[ActivitySearchType]:
+
+        check_search_input_data(**locals())
+
+        workspace_id = get_workspace_id(info=info)
+        template_version = workspace_model.objects.get(id=workspace_id).config.get('template_version',
+                                                                                   settings.DEFAULT_TEMPLATES_VERSION)
+        templates = get_templates(template_version, source_sample_ids, source_sample_data, source_image)
+
+        search_results = ActivityMatcherAPI.search(workspace_id,
+                                                   template_version,
+                                                   templates,
+                                                   nearest_count=max_num_of_candidates_returned,
+                                                   score=confidence_threshold)
 
         return search_results  # noqa
 

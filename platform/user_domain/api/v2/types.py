@@ -1,3 +1,4 @@
+import platform
 from typing import List, Optional
 
 import strawberry
@@ -40,6 +41,49 @@ class WorkspaceType:
     @strawberry.field(description="List of accesses")
     def accesses(root, info: Info) -> List[AccessOutput]:
         return root.accesses.all()
+
+    @strawberry.field(description="Count of agents in workspace")
+    def agents_count(root, info: Info) -> int:
+        return root.agents.count()
+
+    @strawberry.field(description="Count of active agents in workspace")
+    def active_agents_count(root, info: Info) -> int:
+        return root.agents.filter(is_active=True).count()
+
+    @strawberry.field(description="Count of active agents in workspace")
+    def active_devices_count(root, info: Info) -> int:
+        return root.agents.filter(is_active=True).count()
+
+    @strawberry.field(description="Count of profiles in workspace")
+    def profiles_count(root, info: Info) -> int:
+        return root.profiles.count()
+
+    @strawberry.field(description="Count of profile groups in workspace")
+    def profile_groups_count(root, info: Info) -> int:
+        return root.labels.filter(type=Label.PROFILE_GROUP).count()
+
+    @strawberry.field(description="Workspace status")
+    def active(root, info: Info) -> bool:
+        return root.config.get('is_active', False)
+
+    @strawberry.field(description="Workspace payment plan name")
+    def plan_name(root, info: Info) -> Optional[str]:
+        return root.plan_name
+
+    @strawberry.field(description="Url for upgrade workspace payment plan")
+    def checkout_upgrade(root, info: Info) -> Optional[str]:
+        return settings.CHECKOUT_UPGRADE.format(root.id)
+
+    @strawberry.field(description="Url for workspace payment plan details")
+    def detail_card(root, info: Info) -> Optional[str]:
+        return settings.DETAIL_CARD.format(root.id)
+
+
+@strawberry.type(description="Information about the user's workspace, e.g. number of active agents, profiles, etc.")
+class WorkspaceInfoType:
+    id: ID
+    title: str = strawberry.field(description="Workspace title")
+    config: JSON = strawberry.field(description="Workspace config. Witch contains workspace settings and info")
 
     @strawberry.field(description="Count of agents in workspace")
     def agents_count(root, info: Info) -> int:
@@ -147,6 +191,29 @@ class UserType:
     def workspaces(root) -> List[WorkspaceType]:
         accesses = root.accesses.all()
         return Workspace.objects.filter(accesses__in=accesses)
+
+
+@strawberry.type(description="Information about user workspace")
+class PlatformInfoType:
+    @strawberry.field()
+    def platform_version(self, info: Info) -> str:
+        return settings.PRODUCT_VERSION
+
+    @strawberry.field()
+    def template_version(self, info: Info) -> str:
+        return self.config.get('template_version', settings.DEFAULT_TEMPLATES_VERSION)
+
+    @strawberry.field()
+    def sample_ttl(self, info: Info) -> str:
+        return self.config.get('sample_ttl', settings.SAMPLE_TTL)
+
+    @strawberry.field()
+    def activity_ttl(self, info: Info) -> str:
+        return self.config.get('activity_ttl', settings.ACTIVITY_TTL)
+
+    @strawberry.field()
+    def os_version(self, info: Info) -> str:
+        return f"{platform.system()}:{platform.release()}"
 
 
 @strawberry.type(description="Information about user that logged-in and login status")

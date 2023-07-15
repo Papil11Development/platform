@@ -4,8 +4,9 @@ import json
 import base64
 import traceback
 from io import BytesIO
+from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Union, Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple
 from PIL import Image, UnidentifiedImageError
 from django.apps import apps
 from django.http import HttpRequest
@@ -40,11 +41,11 @@ from collector_domain.managers import AgentManager
 from person_domain.tasks import duplicate_persons
 from user_domain.managers import LoginManager
 from user_domain.models import Workspace
-from data_domain.managers import OngoingManager, SampleManager
+from data_domain.managers import OngoingManager, SampleManager, ActivityManager
 from person_domain.managers import PersonManager
 from person_domain.models import Person, Profile
 from data_domain.models import Activity, Blob, BlobMeta, Sample
-from data_domain.tasks import reidentification
+from data_domain.tasks import reidentification, add_to_activity_index
 from platform_lib.validation import is_valid_json
 from notification_domain.models import Trigger, Notification, Endpoint
 from label_domain.models import Label
@@ -59,6 +60,8 @@ from activation_manager.certificate import validate_certificate, generate_certif
 from api_gateway.api.utils import authorization, cors_resolver, set_cookies, get_access, check_workspace
 from api_gateway.api.token import Token
 from notification_domain.tasks import triggers_handler
+from licensing.common_managers import LicensingCommonEvent
+from plib.tracing.utils import get_tracer, ContextStub
 
 
 class TemporalHttpResponse(JsonResponse):
@@ -85,60 +88,62 @@ class APIView(GraphQLView):
 
     def dispatch(self, request, *args, **kwargs):
         # Call '__options' method before 'super().dispatch' otherwise '__options' will never be invoked.
-        if request.method == 'OPTIONS':
-            return self.__options(request, *args, **kwargs)
+        tracer = get_tracer(__name__)
+        with tracer.start_as_current_span("dispatch_graphql") if tracer else ContextStub() as span:
+            if request.method == 'OPTIONS':
+                return self.__options(request, *args, **kwargs)
 
-        if not self.is_request_allowed(request):
-            return HttpResponseNotAllowed(
-                ["GET", "POST"], "GraphQL only supports GET and POST requests."
+            if not self.is_request_allowed(request):
+                return HttpResponseNotAllowed(
+                    ["GET", "POST"], "GraphQL only supports GET and POST requests."
+                )
+
+            if self.should_render_graphiql(request):
+                return self._render_graphiql(request)
+
+            request_data = self.get_request_data(request)
+            span.set_attribute("query", re.sub(r':\s*"([A-Za-z0-9+/=]*)"', '', request_data.query))
+            sub_response = TemporalHttpResponse()
+            context = self.get_context(request, response=sub_response)
+            root_value = self.get_root_value(request)
+
+            method = request.method
+            allowed_operation_types = OperationType.from_http(method)
+
+            if not self.allow_queries_via_get and method == "GET":
+                allowed_operation_types = allowed_operation_types - {OperationType.QUERY}
+
+            try:
+                result = self.schema.execute_sync(
+                    request_data.query,
+                    root_value=root_value,
+                    variable_values=request_data.variables,
+                    context_value=context,
+                    operation_name=request_data.operation_name,
+                    allowed_operation_types=allowed_operation_types,
+                )
+            except InvalidOperationTypeError as e:
+                raise BadRequest(e.as_http_error_reason(method)) from e
+
+            response_data = self.process_result(request=request, result=result)
+
+            response = self._create_response(
+                response_data=response_data, sub_response=sub_response
             )
 
-        if self.should_render_graphiql(request):
-            return self._render_graphiql(request)
+            origin = request.META.get('HTTP_ORIGIN')
 
-        request_data = self.get_request_data(request)
+            if origin is not None and 'HTTP_TOKEN' in request.META:
+                self.__set_cors_headers(response, origin)
 
-        sub_response = TemporalHttpResponse()
-        context = self.get_context(request, response=sub_response)
-        root_value = self.get_root_value(request)
+            if request.user.is_authenticated:
+                cookies = {'username': request.user.username, 'user_status': 'logged_in'}
+            else:
+                cookies = {'user_status': 'logged_out'}
 
-        method = request.method
-        allowed_operation_types = OperationType.from_http(method)
+            set_cookies(cookies, response)
 
-        if not self.allow_queries_via_get and method == "GET":
-            allowed_operation_types = allowed_operation_types - {OperationType.QUERY}
-
-        try:
-            result = self.schema.execute_sync(
-                request_data.query,
-                root_value=root_value,
-                variable_values=request_data.variables,
-                context_value=context,
-                operation_name=request_data.operation_name,
-                allowed_operation_types=allowed_operation_types,
-            )
-        except InvalidOperationTypeError as e:
-            raise BadRequest(e.as_http_error_reason(method)) from e
-
-        response_data = self.process_result(request=request, result=result)
-
-        response = self._create_response(
-            response_data=response_data, sub_response=sub_response
-        )
-
-        origin = request.META.get('HTTP_ORIGIN')
-
-        if origin is not None and 'HTTP_TOKEN' in request.META:
-            self.__set_cors_headers(response, origin)
-
-        if request.user.is_authenticated:
-            cookies = {'username': request.user.username, 'user_status': 'logged_in'}
-        else:
-            cookies = {'user_status': 'logged_out'}
-
-        set_cookies(cookies, response)
-
-        return response
+            return response
 
     @classmethod
     def __options(cls, request, *args, **kwargs):
@@ -198,8 +203,8 @@ class PostProcess(View):
         if not request.content_type == 'multipart/form-data':
             return HttpResponseBadRequest(json.dumps({'errors': 'Content-Type must be multipart/form-data'}))
 
-        workspace = kwargs.get('workspace')
-        token: Token = kwargs.get('token')
+        workspace: Workspace = kwargs['workspace']
+        token: Token = kwargs['token']
 
         if token.is_activation():
             agent = Agent.objects.get(activations=Activation.objects.get(id=token.id))
@@ -232,37 +237,55 @@ class PostProcess(View):
             return HttpResponse(json.dumps({'data': 'Media has been posted.'}))
 
         humans_pack = RawProcessManager.parse_human_processes(sample['processes'])
-        details = {'succeed': 0, 'failed': 0, 'ongoings': 0, 'total': len(humans_pack)}
-        ongoings = []
+        details = {'succeed': 0, 'failed': 0, 'total': len(humans_pack)}
+        ongoings = defaultdict(lambda: [])
+        activities_to_index = []
         for human in humans_pack:
             human_process_manager = ActivityProcessManager(human)
             rois = human_process_manager.get_roi_process()
+            camera = Camera.objects.get(id=human_process_manager.get_human_process()['source'])
             if rois:
-                self.__get_or_create_roi(rois, workspace, agent)
+                self.__get_or_create_roi(rois, workspace, camera)
 
             try:
-                if human_process_manager.is_activity_finalized() and human_process_manager.get_person_id():
+                if human_process_manager.get_person_id():
                     UsageAnalytics(
                         username=workspace.accesses.first().user.username,
                         operation='activity',
                         meta={'device': str(agent.id)}
                     ).start()
-                    activity, need_reid = self.__create_activity_record(human, workspace, agent)
+                    try:
+                        existing_activity = ActivityManager.get_activity(
+                            workspace_id=str(workspace.id),
+                            activity_id=human_process_manager.get_human_process().get('id', ''))
+                    except ObjectDoesNotExist:
+                        existing_activity = None
+                    activity, need_reid, template_info = self.__create_or_update_activity(
+                        human,
+                        workspace,
+                        camera,
+                        human_process_manager.is_activity_finalized(),
+                        activity=existing_activity
+                    )
                     # TODO move sample creation in activity when update activity meta
-                    self.__create_samples_by_activity(workspace.id, activity)
+                    self.__create_samples_by_activity(str(workspace.id), activity)
+                    ongoings[str(camera.id)].append(activity.data)
 
-                    if activity:
-                        details['succeed'] += 1
-                        if need_reid:
-                            PostProcess.__reidentify(activity)
-                else:
-                    ongoings.append(human)
-                    details['ongoings'] += 1
+                    details['succeed'] += 1
+                    if need_reid:
+                        PostProcess.__reidentify(activity)
+                    if template_info:
+                        activities_to_index.append(template_info)
             except Exception:
                 details['failed'] += 1
                 traceback.print_exc()
+
+        if activities_to_index:
+            template_version = workspace.config.get('template_version', settings.DEFAULT_TEMPLATES_VERSION)
+            add_to_activity_index.delay(str(workspace.id), template_version, activities_to_index)
+
         if ongoings:
-            self.__create_ongoings(ongoings, workspace, agent)
+            self.__create_ongoings(ongoings, workspace)
 
         if details['failed']:
             return HttpResponseBadRequest(json.dumps({'errors': 'Failed record creation.', 'details': details}))
@@ -270,7 +293,7 @@ class PostProcess(View):
         return HttpResponse(json.dumps({'data': 'Data has been posted.', 'details': details}))
 
     @classmethod
-    def __create_samples_by_activity(cls, workspace_id: Union[str, uuid.UUID], activity: Activity):
+    def __create_samples_by_activity(cls, workspace_id: str, activity: Activity):
         # TODO Extend with another sample types
         def __parce_face_process_info_in_sample(face_process: Dict) -> Dict:
             # TODO use activity data manager when it merged
@@ -282,14 +305,16 @@ class PostProcess(View):
                 if regex.search(key):
                     templates_to_create.append(key)
 
+            if not templates_to_create:  # do not create sample without templates
+                raise NotImplementedError
+
             face_object = {
                 'id': 1,  # TODO replace hardcoded value
                 'class': 'face',
             }
 
-            if templates_to_create:
-                face_object['templates'] = {template_version: face_embeddings[template_version]
-                                            for template_version in templates_to_create}
+            face_object['templates'] = {template_version: face_embeddings[template_version]
+                                        for template_version in templates_to_create}
 
             if crop_image := face_process.get('$best_shot'):
                 face_object['$cropImage'] = crop_image
@@ -307,11 +332,15 @@ class PostProcess(View):
                 f'objects@{SampleObjectsName.PROCESSING_CAPTURER}': [face_object]
             }
 
-        face_process = cls.__get_face_process(activity.data)
-        if face_process:
-            face_sample_meta = __parce_face_process_info_in_sample(face_process)
-            face_sample = Sample.objects.create(workspace_id=workspace_id, meta=face_sample_meta)
-            face_process['sample_id'] = str(face_sample.id)
+        face_processes = ActivityProcessManager(activity.data).get_face_processes()
+        for face_process in face_processes:
+            if not face_process.get('sample_id'):
+                try:
+                    face_sample_meta = __parce_face_process_info_in_sample(face_process)
+                except NotImplementedError:
+                    continue
+                face_sample = SampleManager.create_sample(workspace_id, face_sample_meta)
+                face_process['sample_id'] = str(face_sample.id)
 
         activity.save()
 
@@ -354,57 +383,119 @@ class PostProcess(View):
 
     @classmethod
     @transaction.atomic
-    def __create_activity_record(cls, sample: dict, workspace: Workspace, agent: Agent) -> Tuple[Activity, bool]:
+    def __create_or_update_activity(cls, sample: dict, workspace: Workspace, camera: Camera, finalized: bool,
+                                    activity: Optional[Activity] = None) -> \
+            Tuple[Activity, bool, dict]:
         if not RawProcessManager.validate_sample_meta(
                 {k: v for k, v in sample.items() if not k.startswith(RawProcessManager.bsm_indicator)}
         ):
             raise ValidationError('Validation error. Meta failed.')
 
+        def create_and_substitute_bsms(meta: dict, bsms: list, activity_id: str,
+                                       filters: Optional[List[int]] = None) -> dict:
+            context['activity_id'] = activity_id
+            if filters:
+                # if bsms = [bsm0, bsm1, bsm2, bsm3] and filters = [2, 3] -> bsms = [bsm2, bsm3]
+                bsms = [bsms[i] for i in filters]
+            created_bsms = cls.__create_bsms(bsms, workspace, context)
+            if filters:  # place bsm in right position in list to use RawProcessManager.substitute_bsms
+                created_bsms.reverse()
+                tmp = []
+                for i in filters:  # filters = [2, 3] -> tmp = [None, None, <bsm>, <bsm>]
+                    tmp += [None] * (i - len(tmp))
+                    tmp.append(created_bsms.pop())
+                created_bsms = tmp
+
+            return RawProcessManager.substitute_bsms(meta, created_bsms)
+
+        _reject_in_merge_dicts = ['quality']
+
+        def merge_dicts(original: dict, new: dict) -> dict:
+            # merge all except bsm and quality
+            for key, val in new.items():
+                if isinstance(val, dict):
+                    original[key] = merge_dicts(original.get(key, {}), val)
+                elif not (isinstance(key, str) and ((key.startswith(RawProcessManager.bsm_indicator) or
+                                                     key in _reject_in_merge_dicts)
+                                                    and key in original)):
+                    original[key] = new[key]
+            return original
+
         sample_type = cls.__get_sample_type(sample)
-        meta, bsms = RawProcessManager.extract_bsms(sample)
-        activity = None
+        if sample_type != cls.process_type:
+            return None, False, None
+
+        raw_meta, bsms = RawProcessManager.extract_bsms(sample)
         context = {}
-        # match_data = PostProcess.__get_parent_process(sample).get('object').get('match_data')
-        # if match_data and match_data.get('score', 1) >= workspace.config.get('activity_score_threshold',
-        #                                                                      settings.DEFAULT_SCORE_THRESHOLD_VALUE):
-        #     need_reid = False
-        #     person_id = PostProcess.__get_parent_process(sample).get('object').get('id')
-        # elif match_data:
-        #     need_reid = False
-        #     person_id = None
-        # else:
-        #     need_reid = True
-        #     person_id = None
 
-        person_id = None
-        need_reid = True
+        sample_manager = ActivityProcessManager(raw_meta)
+        parent_process = sample_manager.get_human_process()
+        face_processes = sample_manager.get_face_processes()
 
-        if sample_type == PostProcess.process_type:
-            activity_id = PostProcess.__get_parent_process(sample).get('id')
+        if activity is None:  # create new activity
+            activity_id = parent_process.get('id')
             activity = Activity.objects.create(
                 id=activity_id, data={}, creation_date=utcnow_with_tz(), workspace=workspace,
-                person_id=person_id
+                person_id=None
             )
-
-            camera = Camera.objects.get(agent=agent.id)
             activity.camera = camera
-            context['activity_id'] = str(activity.id)
+            final_meta = create_and_substitute_bsms(raw_meta, bsms, str(activity.id))
+        else:  # update existing activity
+            activity = ActivityManager.lock_activity(activity)
+            activity_processes = activity.data['processes']
+            for process in raw_meta['processes']:
+                existing_process = next(filter(lambda p: p['id'] == process['id'], activity_processes), None)
+                if not existing_process:  # append new process to activity
+                    blob_items = ActivityProcessManager.get_blob_items(process)
+                    if blob_items:  # create new blobs
+                        process = create_and_substitute_bsms(
+                            {'processes': [process]}, bsms, str(activity.id))['processes'][0]
+                    activity_processes.append(process)
+                else:  # update existing process
+                    old_blob_items = ActivityProcessManager.get_blob_items(existing_process)
+                    new_blob_items = ActivityProcessManager.get_blob_items(process)
+                    filters = [nv for (nk, nv) in new_blob_items if (nk, nv) not in old_blob_items]
+                    merge_dicts(existing_process, process)
+                    if filters:
+                        process = create_and_substitute_bsms(
+                            {'processes': [existing_process]}, bsms, str(activity.id), filters)['processes'][0]
+            final_meta = raw_meta
+            final_meta['processes'] = activity_processes
 
-        created_bsms = cls.__create_bsms(bsms, workspace, context)
-        meta = RawProcessManager.substitute_bsms(meta, created_bsms)
+        match_data = parent_process['object'].get('match_data')
+        activity_score_threshold = workspace.config.get('activity_score_threshold',
+                                                        settings.DEFAULT_SCORE_THRESHOLD_VALUE)
+        quality = face_processes[0]['object'].get('quality', 0) if face_processes else 0
 
-        if not RawProcessManager.validate_sample_meta(meta):
+        if (
+                (match_data is not None) and
+                (match_data.get('score', 0) > activity_score_threshold) and
+                (quality > settings.MATCHRESULT_PASS_QUALITY_THRESHOLD)
+        ):
+            activity.person_id = parent_process['object']['id']
+
+            # Reid for main sample update
+            need_reid = True
+        else:
+            need_reid = ((not activity.person) and
+                         (ActivityProcessManager(final_meta).get_template_ids() is not None))
+
+        if not RawProcessManager.validate_sample_meta(final_meta):
             raise ValidationError('Validation error. Sample failed')
 
         assert activity, 'Not implemented type'
 
-        if sample_type == cls.process_type:
-            activity.data = meta
-            activity.save()
+        activity.data = final_meta
+        activity.status = Activity.Type.FINALIZED if finalized else Activity.Type.PROGRESS
+        activity.save()
 
-            return activity, need_reid
+        template_info = None
+        if finalized:
+            template_version = workspace.config.get('template_version', settings.DEFAULT_TEMPLATES_VERSION)
+            template_id = (ActivityProcessManager(final_meta).get_template(template_version) or {}).get("id")
+            template_info = {"id": template_id, "activityId": str(activity.id)} if template_id else None
 
-        return None, False
+        return activity, need_reid, template_info
 
     @classmethod
     def __reidentify(cls, activity: Activity):
@@ -447,55 +538,56 @@ class PostProcess(View):
 
     @classmethod
     @transaction.atomic
-    def __create_ongoings(cls, ongoings: List[dict], workspace: Workspace, agent=None) -> None:
-        camera = Camera.objects.get(agent=agent) if agent else None
-        location = camera.locations.first() if camera else None
-        camera_id = str(camera.id) if camera else ''
-        location_id = str(location.id) if location else ''
+    def __create_ongoings(cls, ongoings: dict, workspace: Workspace) -> None:
+        cameras = Camera.objects.filter(id__in=list(ongoings.keys())).prefetch_related('locations')
 
-        only_humans = []
-        for ongoing in ongoings:
-            ongoing_manager = ActivityProcessManager(ongoing)
-            human = ongoing_manager.get_human_process()
-            rois = ongoing_manager.get_roi_process()
+        for camera in cameras:
+            location = camera.locations.first()
+            location_id = str(location.id) if location else ''
+            only_humans = []
 
-            rois_lst = []
-            for roi in rois:
-                camera_roi_id = roi.get('object', {}).get('id', '')
-                roi_title = roi.get('object', {}).get('name', '')
+            for ongoing in ongoings[str(camera.id)]:
+                ongoing_manager = ActivityProcessManager(ongoing)
+                human = ongoing_manager.get_human_process()
+                rois = ongoing_manager.get_roi_process()
 
-                if not ongoing_manager.is_process_finalized(roi) and camera_roi_id and roi_title:
-                    rois_lst.append({'camera_roi_id': camera_roi_id, 'title': roi_title})
+                rois_lst = []
+                for roi in rois:
+                    camera_roi_id = roi.get('object', {}).get('id', '')
+                    roi_title = roi.get('object', {}).get('name', '')
 
-            face_best_shot = ongoing_manager.get_face_best_shot()
-            body_best_shot = ongoing_manager.get_body_best_shot()
+                    if not ongoing_manager.is_process_finalized(roi) and camera_roi_id and roi_title:
+                        rois_lst.append({'camera_roi_id': camera_roi_id, 'title': roi_title})
 
-            # TODO remove when agent send profile_id
-            profile_model = apps.get_model('person_domain', 'Profile')
-            person_id = human['object']['id']
+                face_best_shot = ongoing_manager.get_face_best_shot()
+                body_best_shot = ongoing_manager.get_body_best_shot()
 
-            try:
-                profile_id = str(profile_model.objects.get(person_id=person_id).id)
-            except ObjectDoesNotExist:
-                profile_id = None
+                # TODO remove when agent send profile_id
+                profile_model = apps.get_model('person_domain', 'Profile')
+                person_id = human['object']['id']
 
-            human['object']['profile_id'] = profile_id
+                try:
+                    profile_id = str(profile_model.objects.get(person_id=person_id).id)
+                except ObjectDoesNotExist:
+                    profile_id = None
 
-            # Face best shot for front body position
-            cache_condition = face_best_shot and profile_id
+                human['object']['profile_id'] = profile_id
 
-            if cache_condition:
-                RealtimeImageCacheManager.set_realtime_image_cache(profile_id, face_best_shot, body_best_shot)
+                # Face best shot for front body position
+                cache_condition = face_best_shot and profile_id
 
-            only_humans.append({'processes': [human],
-                                'location_id': location_id,
-                                'rois': rois_lst,
-                                'camera_id': camera_id,
-                                'have_face_best_shot': True if cache_condition else False,
-                                'have_body_best_shot': True if body_best_shot and cache_condition else False,
-                                })
+                if cache_condition:
+                    RealtimeImageCacheManager.set_realtime_image_cache(profile_id, face_best_shot, body_best_shot)
 
-        OngoingManager.set_ongoings(only_humans, str(workspace.id), camera_id)
+                only_humans.append({
+                    'processes': [human],
+                    'location_id': location_id,
+                    'rois': rois_lst,
+                    'camera_id': str(camera.id),
+                    'face_best_shot': face_best_shot.get('id') if face_best_shot else None,
+                    'body_best_shot': body_best_shot.get('id') if body_best_shot else None,
+                })
+            OngoingManager.set_ongoings(only_humans, str(workspace.id), str(camera.id))
         triggers_handler.delay(str(workspace.id))
 
     # TODO: Move to activity data manager?
@@ -504,12 +596,7 @@ class PostProcess(View):
         return next(filter(lambda track: track.get('object', {}).get('class', '') == 'human', sample['processes']), {})
 
     @staticmethod
-    def __get_face_process(sample: dict) -> dict:
-        return next(filter(lambda track: track.get('object', {}).get('class', '') == 'face', sample['processes']), {})
-
-    @staticmethod
-    def __get_or_create_roi(rois: list, workspace: Workspace, agent: Agent):
-        camera = Camera.objects.get(agent=agent.id)
+    def __get_or_create_roi(rois: list, workspace: Workspace, camera: Camera):
         roi_ids = []
 
         for roi in rois:
@@ -583,10 +670,33 @@ class ActivationView(View):
 
         workspace = agent.workspace
 
-        if not workspace.config['is_active']:
+        # TODO Delete after licensing fix
+        # TODO Need to be refactored. Same code in
+        # platform_lib/strawberry_auth/permissions.py
+        if settings.IS_ON_PREMISE:
+            cache = settings.GLOBAL_LICENSING_CACHE
+            ws_cache = cache.get(str(workspace.id))
+            now = utcnow_with_tz()
+
+            last_update = ws_cache.get('last_update') if ws_cache else now
+
+            if ws_cache is None or (now - last_update).total_seconds() > settings.VERIFY_LICENSE_DELTA:
+                try:
+                    is_active = LicensingCommonEvent(str(workspace.id)).is_active()
+                    cache.setdefault(str(workspace.id), {}).update(
+                        {
+                            'status': is_active,
+                            'last_update': now
+                        }
+                    )
+                    if not is_active:
+                        raise WorkspaceInactive()
+                except NotImplementedError:
+                    raise WorkspaceInactive()
+        elif not workspace.config['is_active']:
             raise WorkspaceInactive()
 
-        working_template = workspace.config.get('template_version', 'template10v100')
+        working_template = workspace.config.get('template_version', settings.DEFAULT_TEMPLATES_VERSION)
 
         custom_data = activation_data.get('CustomData')
         if custom_data:
@@ -720,12 +830,6 @@ class GetNotifications(View):
 class GetImage(View):
     @cache_control(public=True, max_age=3600)
     def get(self, request, sample_id, *args, **kwargs):
-        if not request.user.is_authenticated:
-            return HttpResponse(status=400, content='Permission denied')
-
-        workspace_ids = request.user.accesses.values_list('workspace_id', flat=True)
-        workspace_filter = Q(workspace_id__in=workspace_ids)
-
         try:
             uuid.UUID(sample_id)
         except ValueError:
@@ -761,9 +865,6 @@ class GetImage(View):
 @method_decorator([csrf_exempt, cors_resolver], name='dispatch')
 class GetRealtimeImage(View):
     def get(self, request, image_key, *args, **kwargs):
-        if not request.user.is_authenticated:
-            return HttpResponse(status=400, content='Permission denied')
-
         profile_model = apps.get_model('person_domain', 'Profile')
         profile_id = RealtimeImageCacheManager.get_profile_id_from_key(image_key)
 
@@ -802,7 +903,7 @@ class GetAgentLink(View):
                 operation='agent_download',
                 username=request.COOKIES.get('username'),
                 meta={"os_version": os_version}
-                ).start()
+            ).start()
             return HttpResponseRedirect(url)
         else:
             return HttpResponse(status=404)

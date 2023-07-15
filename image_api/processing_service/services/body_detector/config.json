@@ -1,0 +1,16 @@
+{
+    "block_config": {
+        "unit_type": "HUMAN_BODY_DETECTOR",
+        "model_path": "/face_sdk/share/bodydetectors/body.enc",
+        "ONNXRuntime": {
+            "library_path": "/face_sdk/lib"
+        }
+    },
+    "meta_config":{
+        "conversion_needle": "RGB",
+        "versions": {
+            "v1": {},
+            "v2": {}
+        }
+    }
+}

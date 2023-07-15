@@ -37,19 +37,18 @@ def check_face_quality(best_shot_quality: float):
 
 def create_profile_info(data: ProfileInput,
                         workspace: Workspace,
-                        p_sample: Optional[Sample] = None,
-                        blob_meta_id: Optional[str] = None) -> Tuple[Profile, Person]:
+                        p_sample: Optional[Sample] = None) -> Tuple[Profile, Person]:
 
     sample_ids = None
     profile_info = data.info
 
     if p_sample is not None:
         profile_info = {
+            **data.info,
             'age': SampleManager.get_age(p_sample.meta),
             'gender': SampleManager.get_gender(p_sample.meta).upper(),
             'main_sample_id': str(p_sample.id),
-            'avatar_id': blob_meta_id,
-            **data.info
+            'avatar_id': str(p_sample.id)
         }
 
         sample_ids = [str(p_sample.id)]
@@ -67,15 +66,17 @@ def handle_image(img: CustomBinaryType, template_version: str, workspace_id: str
         objects_key = f'objects@{SampleObjectsName.PROCESSING_CAPTURER}'
 
         processing_result = SampleManager.process_image(image=img, template_version=template_version)
-
         if len(processing_result[objects_key]) > 1:
             raise BadInputDataException('0x35vd45ms')
-
+        if (errors := processing_result.get('errors')) is not None:
+            raise Exception(errors[0])
         # raw_template = processing_result[objects_key][0]['templates'][f"${template_version}"]
 
         processing_result_with_ids = SampleManager.create_blobs(workspace_id, meta=processing_result)
         face_meta_with_ids = processing_result_with_ids[objects_key][0]
 
+        quality = processing_result[objects_key][0]['quality']
+        check_face_quality(quality)
         created_sample = SampleManager.create_sample(
             workspace_id=workspace_id,
             sample_meta={
@@ -83,21 +84,13 @@ def handle_image(img: CustomBinaryType, template_version: str, workspace_id: str
                 objects_key: [face_meta_with_ids]
             })
 
-    _, created_sample, quality = SampleManager.update_sample_quality(created_sample.id, template_version)
-
-    try:
-        check_face_quality(quality)
-    except BadInputDataException:
-        SampleManager.delete(workspace_id, [created_sample.id])
-        raise
-
     return created_sample, quality
 
 
 def optimizer_profile_queryset(queryset: QuerySet):
     activities = apps.get_model('data_domain', 'Activity')
     return queryset.select_related('person').prefetch_related(
-            'profile_groups',
-            'samples',
-            Prefetch('person__activities', queryset=activities.objects.order_by('creation_date'))
-            ).distinct()
+        'profile_groups',
+        'samples',
+        Prefetch('person__activities', queryset=activities.objects.order_by('creation_date'))
+    ).distinct()

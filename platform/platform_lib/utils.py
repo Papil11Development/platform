@@ -16,6 +16,7 @@ import pytz
 import requests
 from django.urls import reverse
 from django.utils.html import format_html, escape
+from plib.tracing.utils import get_current_tracing_context
 from requests.exceptions import ConnectionError, HTTPError
 from PIL import ImageOps
 from abc import ABC, abstractmethod
@@ -170,7 +171,9 @@ def get_paginated_model(model_class,
                         filter_map: dict = None,
                         model_exclude: dict = None,
                         with_archived: str = None,
-                        optimize_query: Callable = None) -> Tuple[int, QuerySet]:
+                        predefine_queryset: QuerySet = None,
+                        optimize_query: Callable = None,
+                        get_total_count: bool = True) -> Tuple[int, QuerySet]:
     query_filter = Q(workspace__id=workspace_id)
 
     if ids is not None:
@@ -180,18 +183,27 @@ def get_paginated_model(model_class,
     if model_filter:
         query_filter &= get_filters(model_filter, filter_map)
 
+    if predefine_queryset is not None:
+        start_objects = predefine_queryset
+    else:
+        start_objects = model_class.objects
+
     if with_archived is None:
-        queryset = model_class.objects.filter(query_filter).distinct()
+        queryset = start_objects.filter(query_filter).distinct()
     elif with_archived.lower() == 'all':
         query_filter &= Q(is_active__in=[True, False])
-        queryset = model_class.objects.all(query_filter).distinct()
+        queryset = start_objects.all(query_filter).distinct()
     elif with_archived.lower() == 'archived':
         query_filter &= Q(is_active=False)
-        queryset = model_class.objects.all(query_filter).distinct()
+        queryset = start_objects.all(query_filter).distinct()
     else:
-        queryset = model_class.objects.filter(query_filter).distinct()
+        queryset = start_objects.filter(query_filter).distinct()
 
-    total_count = queryset.count()
+    if get_total_count:
+        # https://code.djangoproject.com/ticket/30685
+        total_count = start_objects.filter(query_filter).values("id").order_by().count()
+    else:
+        total_count = 0
 
     if limit is None or limit > settings.QUERY_LIMIT:
         limit = settings.QUERY_LIMIT
@@ -439,8 +451,11 @@ class UsageAnalytics(threading.Thread):
     @elk_checker
     def run(self):
         if self.ok:
-            requests.post(self.url, headers=settings.ELASTIC_HEADERS_INT,
-                          data=json.dumps(self.data), timeout=settings.USAGE_SEND_TIMEOUT)
+            try:
+                requests.post(self.url, headers=settings.ELASTIC_HEADERS_INT,
+                              data=json.dumps(self.data), timeout=settings.USAGE_SEND_TIMEOUT)
+            except requests.exceptions.ConnectTimeout:
+                pass
 
 
 class ActivityDocumentManager:
@@ -539,6 +554,19 @@ def validate_image(image: bytes):
             raise BadInputDataException("0x006dd809")
 
 
+def fixed_validate_image(image: bytes):
+    with BytesIO(image) as file:
+        try:
+            img_object = open_image(file)
+        except UnidentifiedImageError:
+            raise BadInputDataException("0x6fd9bed7")
+
+        if img_object.width > settings.MAX_IMAGE_WIDTH:
+            raise BadInputDataException("0x006dd808")
+        if img_object.height > settings.MAX_IMAGE_HEIGHT:
+            raise BadInputDataException("0x006dd809")
+
+
 def point_transform(face_info: dict) -> list:
     size = [face_info['bounding_box']['face_rectangle']['width'],
             face_info['bounding_box']['face_rectangle']['height']]
@@ -552,7 +580,7 @@ def point_transform(face_info: dict) -> list:
 
 
 def get_detect(image: str or bytes, templates_to_create: list,
-               face_info: dict or None or list, request_id=None) -> list:
+               face_info: dict or None or list, request_id=None, is_anonymous=False) -> list:
     if isinstance(image, str):
         try:
             validator = URLValidator()
@@ -574,7 +602,8 @@ def get_detect(image: str or bytes, templates_to_create: list,
                        faceCrop {{x, y, width, height}},
                        sampleInfo,
                        processingInfo,
-                       image,
+                       faceQuality,
+                       {"" if is_anonymous else "image"},
                        {templates_fields}
                    }}
                }}'''
@@ -585,6 +614,10 @@ def get_detect(image: str or bytes, templates_to_create: list,
     headers = {'X_REQUEST_ID': request_id}
     operations = json.dumps({'query': query, 'variables': variables})
     request_map = json.dumps({'0': ['variables.file']})
+
+    tracing_context = get_current_tracing_context()
+    headers.update(tracing_context)
+
     response = requests.post(
         f'{settings.PROCESSING_SERVICE_URL}/graphql',
         data={'operations': operations, 'map': request_map},
@@ -592,12 +625,15 @@ def get_detect(image: str or bytes, templates_to_create: list,
         headers=headers,
         timeout=settings.SERVICE_TIMEOUT)
     result = response.json()
-    if result.get('errors'):
+    if result.get('errors') and result.get('errors')[0].get('message') == "No faces found":
+        raise BadInputDataException('0x95bg42fd')
+    elif result.get('errors'):
         raise Exception(result.get('errors')[0].get('message'))
-    for face in result['data']['faces']:
-        face.update({'sourceImage': image})
-    result = result['data']['faces']
-    return result
+
+    if not is_anonymous:
+        for face in result['data']['faces']:
+            face.update({'sourceImage': image})
+    return result['data']['faces']
 
 
 def face_processing_data_parser(faces: List[dict]) -> dict:
@@ -627,31 +663,41 @@ def face_processing_data_parser(faces: List[dict]) -> dict:
             'templates': {f'${template_version}': face[template_version]
                           for template_version in templates_to_create},
             'bbox': processing_info['bbox'],
-            '$cropImage': face['image'],
+            '$cropImage': face.get('image'),
             'keypoints': keypoints,
             'age': face_meta['age']['value'],
             'emotions': emotions,
             'gender': face_meta['gender']['value'],
             'liveness': face_meta['liveness'],
             'angles': processing_info['angles'],
-            'mask': face_meta['mask']
+            'mask': face_meta['mask'],
+            **({'quality': face['faceQuality']} if 'faceQuality' in face else {}),
         }
 
-    source_image = faces[0]['sourceImage']
+    source_image = faces[0].get('sourceImage')
 
-    return {
-        '$image': base64.b64encode(source_image).decode(),
+    result = {
+        '$image': base64.b64encode(source_image).decode() if source_image else None,
         f'objects@{SampleObjectsName.PROCESSING_CAPTURER}': [
             parse_face_info(face, idx) for idx, face in enumerate(faces, 1)
         ],
     }
+    if (errors := json.loads(faces[0]['processingInfo']).get('errors')) is not None:
+        result['errors'] = errors
+    return result
 
 
 def estimate_quality(template_version: str, best_shot_id: str) -> float:
     params = json.dumps({'template_version': template_version, 'best_shot_id': best_shot_id})
     try:
-        response = requests.post(f'{settings.QUALITY_SERVICE_URL}/estimate/face', data=params,
-                                 timeout=settings.SERVICE_TIMEOUT)
+        tracing_context = get_current_tracing_context()
+
+        response = requests.post(
+            f'{settings.QUALITY_SERVICE_URL}/estimate/face',
+            data=params,
+            timeout=settings.SERVICE_TIMEOUT,
+            headers=tracing_context
+        )
         response.raise_for_status()
         return response.json().get('quality')
     except (ConnectionError, HTTPError) as ex:
@@ -788,3 +834,14 @@ class ModelMixin:
         signals.post_delete.send(
             sender=type(self), instance=self
         )
+
+
+def camel(snake_str: str) -> str:
+    """Convert string form camel to snake"""
+    first, *others = snake_str.split('_')
+    return ''.join([first.lower(), *map(str.title, others)])
+
+
+def snake(camel_str: str) -> str:
+    """Convert string form sale to camel"""
+    return re.sub(r'(?<!^)(?=[A-Z])', '_', camel_str).lower()

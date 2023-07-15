@@ -1,23 +1,27 @@
 import os
 from typing import List, Optional
 
-from django.apps import apps
-from django.db import transaction
-
-from strawberry import ID
-
-from notification_domain.api.v2.types import EndpointManageOutput, EmailEndpointInput, \
-    WebhookEndpointInput, TriggerManageOutput, DefaultEndpointAlias
-from notification_domain.managers import NotificationManager, TriggerManager, EndpointManager
-from notification_domain.models import Endpoint
-from platform_lib.exceptions import BadInputDataException
-from platform_lib.utils import get_workspace_id, type_desc
-from platform_lib.types import MutationResult, JSONString
-from platform_lib.strawberry_auth.permissions import IsHaveAccess, IsWorkspaceActive
-
 import django
 import strawberry
+from django.apps import apps
+from django.conf import settings
+from django.db import transaction
+from strawberry import ID
 from strawberry.types import Info
+
+from notification_domain.api.v2.types import (DefaultEndpointAlias,
+                                              EmailEndpointInput,
+                                              EndpointManageOutput,
+                                              TriggerManageOutput,
+                                              WebhookEndpointInput)
+from notification_domain.managers import (EndpointManager, NotificationManager,
+                                          TriggerManager)
+from notification_domain.models import Endpoint
+from platform_lib.exceptions import BadInputDataException
+from platform_lib.strawberry_auth.permissions import (IsHaveAccess,
+                                                      IsWorkspaceActive)
+from platform_lib.types import JSONString, MutationResult
+from platform_lib.utils import get_workspace_id, type_desc
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "main.settings")
 django.setup()
@@ -129,7 +133,8 @@ class Mutation:
             title: Optional[str] = None,
             endpoint_ids: Optional[List[ID]] = None,
             endpoint_aliases: Optional[List[DefaultEndpointAlias]] = None,
-            endpoint_url: Optional[str] = None
+            endpoint_url: Optional[str] = None,
+            lifetime: int = settings.NOTIFICATION_DEFAULT_TTL
     ) -> TriggerManageOutput:
 
         workspace_id = get_workspace_id(info)
@@ -152,7 +157,8 @@ class Mutation:
         trigger = trigger_manager.create_label_trigger(
             title=title,
             endpoints=endpoints,
-            targets_list=[profile_group]
+            targets_list=[profile_group],
+            notification_params={'lifetime': lifetime}
         )
 
         return TriggerManageOutput(ok=True, trigger=trigger)
@@ -162,7 +168,8 @@ class Mutation:
                        trigger_id: ID,
                        title: Optional[str] = None,
                        endpoint_ids: Optional[List[ID]] = None,
-                       endpoint_aliases: Optional[List[DefaultEndpointAlias]] = None) -> TriggerManageOutput:
+                       endpoint_aliases: Optional[List[DefaultEndpointAlias]] = None,
+                       lifetime: Optional[int] = None) -> TriggerManageOutput:
         workspace_id = get_workspace_id(info)
         trigger_manager = TriggerManager(workspace_id=workspace_id)
 
@@ -174,10 +181,15 @@ class Mutation:
         if endpoint_aliases is not None:
             endpoints += EndpointManager(workspace_id=workspace_id).get_default_by_alias(endpoint_aliases)
 
+        notification_params = {}
+        if lifetime is not None:
+            notification_params['lifetime'] = lifetime
+
         updated_trigger = trigger_manager.update_trigger(
             trigger_id,
             title,
-            endpoints if (endpoint_ids is not None or endpoint_aliases is not None) else None
+            endpoints if (endpoint_ids is not None or endpoint_aliases is not None) else None,
+            notification_params
         )
 
         return TriggerManageOutput(

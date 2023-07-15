@@ -1,16 +1,18 @@
 import datetime
 import operator
 import strawberry
+from uuid import UUID
 from typing import Optional, List
 
 from django.conf import settings
-from django.core.exceptions import ObjectDoesNotExist
 from strawberry import ID
+
 from data_domain.api.v2.types import SampleOutput, ActivityOutput
 from platform_lib.managers import ActivityProcessManager
 from label_domain.api.v2.types import ProfileGroupOutput
-from platform_lib.types import JSON, MutationResult
+from platform_lib.types import JSON, MutationResult, ExtraFieldInput
 from platform_lib.utils import get_collection, isoformat_time
+from person_domain.utils import get_age_from_birthday
 
 
 @strawberry.type(description="Object that represents a detected person"
@@ -25,6 +27,8 @@ class ProfileOutput:
 
     @strawberry.field(description="Info about human")
     def info(self) -> JSON:
+        if birthday := self.info.get('birthday'):
+            self.info['age'] = get_age_from_birthday(birthday)
         return self.info
 
     @strawberry.field(description="Objects that stored processed info about human blobs.")
@@ -35,12 +39,18 @@ class ProfileOutput:
     @strawberry.field(description="Groups the profile belongs to")
     def profile_groups(self, offset: int = 0, limit: int = settings.QUERY_LIMIT) -> Optional[List[ProfileGroupOutput]]:
         limit = min(limit, settings.QUERY_LIMIT)
-        pg = self._prefetched_objects_cache[self.profile_groups.prefetch_cache_name]
+        try:
+            pg = self._prefetched_objects_cache[self.profile_groups.prefetch_cache_name]
+        except (AttributeError, KeyError):
+            pg = self.profile_groups.filter()
         return pg[offset:offset+limit]
 
     @strawberry.field(description="Best human photo")
     def main_sample(self) -> Optional[SampleOutput]:
-        samples = self._prefetched_objects_cache[self.samples.prefetch_cache_name]
+        try:
+            samples = self._prefetched_objects_cache[self.samples.prefetch_cache_name]
+        except (AttributeError, KeyError):
+            samples = self.samples.all()
         main_sample = next(filter(lambda sample: str(sample.id) == self.info.get("main_sample_id"), samples), None)
         return main_sample
 
@@ -78,6 +88,9 @@ class ProfileOutput:
 class ProfileInput:
     profile_group_ids: Optional[List[Optional[ID]]] = strawberry.field(description='Profile group ids',
                                                                        default=None)
+    fields: Optional[List[ExtraFieldInput]] = strawberry.field(default=None)
+
+    # TODO: Remove it when the frontend is updated
     info: Optional[JSON] = strawberry.field(description='Profile information in JSON', default=None)
 
 
@@ -99,9 +112,16 @@ class ProfilesUpdateOutput(MutationResult):
     profiles: List[ProfileOutput] = strawberry.field(description="Updated profiles")
 
 
+@strawberry.type(description="Workspace profile settings")
+class ProfileSettingsType:
+    id: UUID
+    extra_fields: JSON
+
+
 ProfilesCollection = strawberry.type(get_collection(ProfileOutput, "ProfilesCollection"),
                                      description="Filtered profiles collection and total profiles count")
 
 
 profile_map = {'personInfo': 'person_info', 'groupsIds': 'profile_groups__id__in', 'mainSampleId': 'main_sample_id',
-               'avatarId': 'avatar_id', 'creationDate': 'creation_date', 'lastModified': 'last_modified'}
+               'avatarId': 'avatar_id', 'creationDate': 'creation_date', 'lastModified': 'last_modified',
+               'info__age': 'age'}

@@ -44,7 +44,7 @@ class Mutation:
                              group_ids: type_desc(List[ID], "Profile group ids to delete")) -> MutationResult:
         workspace_id = get_workspace_id(info)
         with atomic():
-            for gr_id in group_ids:
+            for gr_id in set(group_ids):
                 lm = LabelManager(workspace_id=workspace_id, label_id=gr_id)
                 for pr in lm.label.profiles.all():
                     pr_gr_ids = list(map(str, pr.profile_groups.all().values_list('id', flat=True)))

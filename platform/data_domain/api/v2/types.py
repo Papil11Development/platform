@@ -1,4 +1,5 @@
 import datetime
+from enum import Enum
 from typing import Optional, List
 from uuid import UUID
 
@@ -49,6 +50,13 @@ class ActivityOrdering:
     last_modified: auto
 
 
+@strawberry.enum
+class ActivityType(Enum):
+    PROGRESS = 1
+    FINALIZED = 2
+    FAILED = 3
+
+
 @strawberry_django.type(Activity, description="""
 An Activity is an object that stores grouped information
 about some completed processes associated with a Profile, Camera and/or Location
@@ -82,7 +90,7 @@ class ActivityOutput(FilterByWorkspaceMixin):
             return None
 
     @strawberry.field(description="ID of the Location object where the Activity occurred")
-    def location_id(root) -> str:
+    def location_id(root) -> Optional[str]:
         camera_id = root.camera.id
         camera = apps.get_model('collector_domain', 'Camera')
         camera_obj = camera.objects.filter(id=camera_id)
@@ -91,9 +99,18 @@ class ActivityOutput(FilterByWorkspaceMixin):
         return getattr(location, 'id', None)
 
     @strawberry.field(description="Activity start time in ISO 8601 format with time zone")
-    def time_start(root) -> str:
-        timestamp = ActivityProcessManager(root.data).get_human_timeinterval()[0]
-        return isoformat_time(timestamp)
+    def time_start(root) -> Optional[str]:
+        activity_time = ActivityProcessManager(root.data).get_human_timeinterval()[0]
+        return isoformat_time(activity_time) if activity_time else None
+
+    @strawberry.field(description="Activity end time in ISO 8601 format with time zone")
+    def time_end(root) -> Optional[str]:
+        activity_time = ActivityProcessManager(root.data).get_human_timeinterval()[1]
+        return isoformat_time(activity_time) if activity_time else None
+
+    @strawberry.field(description="Activity status")
+    def status(root) -> ActivityType:
+        return root.status
 
 
 @strawberry.type(description="""
@@ -175,6 +192,24 @@ class PersonSearchResult:
 
 
 @strawberry.type
+class ActivitySearchResult:
+    activity: Optional[ActivityOutput]
+
+    @strawberry.field
+    def activity(root) -> Optional[ActivityOutput]:
+        activity_id = root.get('activityId')
+        return Activity.objects.filter(id=activity_id).first()
+
+    @strawberry.field
+    def match_result(root) -> MatchResult:
+        result = root.get('matchResult')
+        if result.get('faR') is not None:
+            result['fa_r'] = result.pop('faR')
+            result['fr_r'] = result.pop('frR')
+        return MatchResult(**result)  # noqa
+
+
+@strawberry.type
 class SearchType:
     @strawberry.field
     def template(root) -> str:
@@ -183,6 +218,24 @@ class SearchType:
     @strawberry.field
     def search_result(root) -> List[PersonSearchResult]:
         return root.get('searchResult')
+
+
+@strawberry.type
+class ActivitySearchType:
+    @strawberry.field
+    def template(root) -> str:
+        return root.get('template')
+
+    @strawberry.field
+    def search_result(root) -> List[ActivitySearchResult]:
+        return root.get('searchResult')
+
+
+@strawberry.enum
+class MultifacePolicy(Enum):
+    ALLOW_MULTIFACE = "ALLOW_MULTIFACE"
+    NOT_ALLOW_MULTIFACE = "NOT_ALLOW_MULTIFACE"
+    BEST_QUALITY_FACE = "BEST_QUALITY_FACE"
 
 
 ActivityCollection = strawberry.type(get_collection(ActivityOutput, 'ActivityCollection'),

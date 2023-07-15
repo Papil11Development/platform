@@ -5,25 +5,23 @@ from datetime import datetime, timedelta
 from functools import reduce
 from typing import Optional, List
 
-from celery import shared_task, execute
-from django.conf import settings
 from django.db import transaction
 from django.db.models import Q, Prefetch
+from django.db.models import DateField, IntegerField, Func
+from django.db.models.functions import Coalesce, Cast
+from django.contrib.postgres.fields.jsonb import KeyTextTransform, KeyTransform
 from django.conf import settings
 from celery import shared_task, execute
-from main.celery import app
-
-
-from data_domain.managers import ActivityManager, SampleManager
 
 from requests.exceptions import ConnectionError as RequestConnectionError
 
 from activation_manager.models import Activation
 from collector_domain.models import Agent, AttentionArea, Camera
 from data_domain.managers import ActivityManager, SampleManager
-from data_domain.matcher.main import MatcherAPI
+from data_domain.matcher.main import MatcherAPI, ActivityMatcherAPI
 from data_domain.models import Activity, Sample, BlobMeta
 from label_domain.models import Label
+
 from main.celery import app
 from main.settings import (DEFAULT_TEMPLATES_VERSION, PUBLIC_KIBANA_URL, DEFAULT_FAR_THRESHOLD_VALUE,
                            MATCHRESULT_BEST_QUALITY_THRESHOLD, MATCHRESULT_PASS_QUALITY_THRESHOLD)
@@ -40,7 +38,6 @@ from user_domain.models import Access
 from user_domain.models import Workspace, User
 
 logger = logging.getLogger(__name__)
-
 
 analytics_funcs = {
     'retail_analytics': lambda ws, elk: retail_analytics(ws, elk),
@@ -100,7 +97,7 @@ def get_media_for_activities(activity: Activity, time_interval: tuple) -> list:
 
 
 def get_activities_batch(workspace_id: str, creation_date: Optional[datetime] = None) -> list:
-    q = Q(workspace_id=workspace_id)
+    q = Q(workspace_id=workspace_id, status=Activity.Type.FINALIZED)
     if creation_date:
         q &= Q(creation_date__gt=creation_date)
     activities = Activity.objects.filter(q).select_related('camera').prefetch_related('camera__locations')
@@ -114,7 +111,22 @@ def get_persons_batch(workspace_id: str) -> list:
     persons_count = persons.count()
     persons = persons.select_related('profile').prefetch_related(
         'profile__profile_groups',
-        Prefetch('activities', queryset=Activity.objects.order_by('creation_date'))
+        Prefetch('activities',
+                 queryset=Activity.objects.filter(status=Activity.Type.FINALIZED).order_by('creation_date'))
+    ).annotate(
+        age=Coalesce(
+            Func(
+                Func(
+                    Cast(KeyTextTransform('birthday', 'profile__info'), output_field=DateField()),
+                    function='AGE'),
+                function='DATE_PART', template="%(function)s('year', %(expressions)s)",
+                output_field=IntegerField()
+            ),
+            Cast(
+                KeyTransform('age', 'info'),
+                output_field=IntegerField()
+            )
+        )
     ).distinct().order_by('creation_date')
     chunks = [persons[i:i + settings.BATCH_SIZE] for i in range(0, persons_count, settings.BATCH_SIZE)]
     return chunks
@@ -158,7 +170,7 @@ def retail_analytics(workspace_id: str, elk_index: str):
                 activity_data = {
                     **data,
                     'person_id': str(person.id),
-                    'age': person.info.get('age'),
+                    'age': person.age,
                     'gender': person.info.get('gender'),
                     'is_staff': is_staff,
                     'first_visit': str(activity.id) in first_activities,
@@ -220,7 +232,6 @@ def get_or_create_analytics(ws: Workspace, analytics_type: str) -> dict:
 
 @shared_task
 def elastic_manager(action: ElasticAction, **kwargs):
-
     def __filter_tasks(task: dict, action: Optional[ElasticAction] = None, workspace_id: Optional[str] = None):
         expr = True
         task_info = task['request'] if task.get('request') else task
@@ -305,13 +316,14 @@ def clean_deactivated_workspaces():
                 res = f(*args)
             consumed_time = datetime.now().timestamp() - start_ts
             return res, round(consumed_time)
+
         return wrapper
 
     delete_after_delta = settings.WORKSPACE_CLEANING_DELTA
-    workspaces = Workspace.objects\
+    workspaces = Workspace.objects \
         .filter(
             config__deactivation_date__isnull=False,
-            config__deactivation_date__lte=(datetime.now()-delete_after_delta).isoformat(),
+            config__deactivation_date__lte=(datetime.now() - delete_after_delta).isoformat(),
             config__is_active=False
         )
 
@@ -401,6 +413,39 @@ def reidentification(activity_id: str):
 
         return data
 
+    ws_config = activity.workspace.config
+    template_version = ws_config['template_version']
+    activity_score_threshold = ws_config['activity_score_threshold']
+
+    # TODO move to another place when PostProcess will be optimized
+    if (person_id := activity.person_id) is not None:
+        person = Person.objects.select_related('profile').get(id=person_id)
+        current_sample = Sample.objects.get(id=person.profile.info.get('main_sample_id'))
+        activity_sample = Sample.objects.get(
+            id=(ActivityManager.get_face_processes(activity) or [{}])[0].get('sample_id')
+        )
+
+        current_quality = SampleManager.get_face_quality(current_sample.meta)
+        activity_quality = SampleManager.get_face_quality(activity_sample.meta)
+
+        with transaction.atomic():
+            if activity_quality > current_quality:
+                person.profile.info['main_sample_id'] = str(activity_sample.id)
+                person.info['main_sample_id'] = str(activity_sample.id)
+
+            person.profile.samples.add(activity_sample)
+            person.samples.add(activity_sample)
+            person.save()
+            person.profile.save()
+
+        if activity_quality > current_quality:
+            template_id = SampleManager.get_template_id(activity_sample.meta, template_version)
+            templates_info = [{'id': str(template_id), 'personId': str(person.id)}]
+            MatcherAPI.set_base_remove(str(activity.workspace.id), template_version, [str(person.id)])
+            MatcherAPI.set_base_add(str(activity.workspace.id), template_version, templates_info)
+
+        return
+
     person_id = data_manager.get_person_id()
     try:
         uuid.UUID(person_id)
@@ -413,9 +458,6 @@ def reidentification(activity_id: str):
     except Sample.DoesNotExist:
         return
 
-    ws_config = activity.workspace.config
-    template_version = ws_config['template_version']
-    activity_score_threshold = ws_config['activity_score_threshold']
     data_for_matching = __get_data_for_matching(face_sample, template_version)
     templates = list(data_for_matching.keys())
 
@@ -512,6 +554,20 @@ def rebuild_index(index: str, template_version: str):
              retry_backoff=5,
              retry_backoff_max=700,
              retry_jitter=True)
+def commit_index():
+    for ws in Workspace.objects.filter(config__is_active=True):
+        template_version = ws.config.get('template_version', settings.DEFAULT_TEMPLATES_VERSION)
+        MatcherAPI.set_base_commit(str(ws.id), template_version)
+
+        for label in Label.objects.filter(workspace_id=ws.id).values_list('id', flat=True):
+            MatcherAPI.set_base_commit(str(label), template_version)
+
+
+@shared_task(autoretry_for=(RequestConnectionError,),
+             max_retries=4,
+             retry_backoff=5,
+             retry_backoff_max=700,
+             retry_jitter=True)
 def add_to_index(index: str, template_version: str, templates_info: list):
     MatcherAPI.set_base_add(index, template_version, templates_info)
 
@@ -534,9 +590,44 @@ def delete_index(index: str, template_version: str):
     MatcherAPI.delete_index(index, template_version)
 
 
+@shared_task(autoretry_for=(RequestConnectionError,),
+             max_retries=4,
+             retry_backoff=5,
+             retry_backoff_max=700,
+             retry_jitter=True)
+def rebuild_activity_index(index: str, template_version: str):
+    ActivityMatcherAPI.set_base(index, template_version)
+
+
+@shared_task(autoretry_for=(RequestConnectionError,),
+             max_retries=4,
+             retry_backoff=5,
+             retry_backoff_max=700,
+             retry_jitter=True)
+def add_to_activity_index(index: str, template_version: str, templates_info: list):
+    ActivityMatcherAPI.set_base_add(index, template_version, templates_info)
+
+
+@shared_task(autoretry_for=(RequestConnectionError,),
+             max_retries=4,
+             retry_backoff=5,
+             retry_backoff_max=700,
+             retry_jitter=True)
+def remove_from_activity_index(index: str, template_version: str, activity_ids: list):
+    ActivityMatcherAPI.set_base_remove(index, template_version, activity_ids)
+
+
+@shared_task(autoretry_for=(RequestConnectionError,),
+             max_retries=4,
+             retry_backoff=5,
+             retry_backoff_max=700,
+             retry_jitter=True)
+def delete_activity_index(index: str, template_version: str):
+    ActivityMatcherAPI.delete_index(index, template_version)
+
+
 @shared_task
 def sample_retention_policy():
-
     def delete_samples(workspace_id: str, sample_ttl: int) -> int:
         with transaction.atomic():
             profile_samples_ids = Profile.objects.filter(
@@ -566,3 +657,42 @@ def sample_retention_policy():
             continue
         if num:
             logger.info(f'Sample retention policy:workspace:{workspace_id} - {num} samples have been deleted.')
+
+
+@shared_task
+def activity_retention_policy():
+    def delete_activities(workspace_id: str, activity_ttl: int, template_version: str) -> int:
+        with transaction.atomic():
+            activities = Activity.objects.filter(
+                workspace_id=workspace_id,
+                creation_date__lt=(utcnow_with_tz() - timedelta(seconds=activity_ttl or settings.ACTIVITY_TTL))
+            )
+
+            activity_ids = list(activities.values_list("id", flat=True))
+            ActivityMatcherAPI.set_base_remove(workspace_id, template_version, activity_ids)
+
+            num, _ = activities.delete()
+            return num
+
+    for (workspace_id,
+         activity_ttl,
+         template_version) in Workspace.objects.values_list('id', 'config__activity_ttl',
+                                                            'config__template_version').iterator():
+        try:
+            num = delete_activities(str(workspace_id), activity_ttl,
+                                    template_version or settings.DEFAULT_TEMPLATES_VERSION)
+        except Exception as ex:
+            logger.error(f'ERROR: activity retention policy:workspace:{workspace_id}\n{ex}')
+            continue
+        if num:
+            logger.info(f'Activity retention policy:workspace:{workspace_id} - {num} activities have been deleted.')
+
+
+@shared_task
+def finalize_dangling_activites():
+    with transaction.atomic():
+        activities = Activity.objects.select_for_update().filter(
+            status=Activity.Type.PROGRESS,
+            last_modified__lte=(utcnow_with_tz() - timedelta(seconds=settings.ACTIVITY_FAILED_TIME)).isoformat())
+
+        activities.update(status=Activity.Type.FAILED)

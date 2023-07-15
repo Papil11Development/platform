@@ -9,7 +9,7 @@ psycopg2-binary = {version = "==2.9.*"}
 gunicorn = {version = "==20.1.*"}
 strawberry-graphql = {version = "==0.127.*", extras = ['debug-server']}
 strawberry-graphql-django = {version = "==0.4.*"}
-requests = {version = "==2.27.*"}
+requests = {version = ">=2.27.*"}
 bson = {version = "==0.5.*"}
 jsonschema = {version = "==4.4.*", extras = ["format"]}
 pillow = {version = "==9.0.*"}
@@ -26,7 +26,8 @@ channels = {version = "==3.0.*"}
 channels-redis= {version = "==3.3.*"}
 stripe = {version = "==2.75.*"}
 django-json-widget = "==1.1.1"
-"cryptlex.lexfloatclient" = "==4.7.1"
+platform-library = {version = "==0.3.0"}
+
 
 [dev-packages]
 coverage = {version = "==6.3.*"}

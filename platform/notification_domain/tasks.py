@@ -37,8 +37,10 @@ def triggers_handler(called_workspace_id: Optional[str] = None):
 
             profile_group_list = human_object.get('match_data', {}).get('profileGroups', [])
             human_object['profile_group_ids'] = [group.get('id') for group in profile_group_list]
-            human_object['have_face_best_shot'] = ongoing.get('have_face_best_shot')
-            human_object['have_body_best_shot'] = ongoing.get('have_body_best_shot')
+            # human_object['have_face_best_shot'] = ongoing.get('have_face_best_shot')
+            # human_object['have_body_best_shot'] = ongoing.get('have_body_best_shot')
+            human_object['face_best_shot'] = ongoing.get('face_best_shot')
+            human_object['body_best_shot'] = ongoing.get('body_best_shot')
             human_object['activity_id'] = human['id']
 
             if key in ongoing_group:
@@ -94,7 +96,7 @@ def triggers_handler(called_workspace_id: Optional[str] = None):
         cached_packed_ongoings = get_packed_ongoings(trigger.workspace.id)
 
         # lambda for reduce database connection time overhead
-        trigger_active_notifications = list(filter(lambda x: x.meta["trigger_id"] == str(trigger.id),
+        trigger_active_notifications = list(filter(lambda x: x.meta["trigger"]["id"] == str(trigger.id),
                                                    active_notifications))
         if cached_packed_ongoings or len(trigger_active_notifications):
             workspace_ids_set.add(str(trigger.workspace.id))

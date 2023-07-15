@@ -1,22 +1,21 @@
 import uuid
-from typing import Optional, List, Tuple, Union, Iterable
+from typing import Iterable, List, Optional, Tuple, Union
 
-from django.db import transaction
+from celery import current_app
 from django.conf import settings
-from django.db.models import QuerySet
+from django.db import transaction
 
-from user_domain.managers import WorkspaceManager
 import platform_lib.utils
-from user_domain.models import Workspace
-from label_domain.models import Label
+from data_domain.managers import SampleManager
+from data_domain.matcher.main import ActivityMatcherAPI, MatcherAPI
+from label_domain.managers import LabelManager
 from person_domain.models import Person, Profile
-from data_domain.models import Activity, Sample
-from data_domain.matcher.main import MatcherAPI
-from platform_lib.types import ElasticAction
 from platform_lib.exceptions import BadInputDataException, InvalidJsonRequest
+from platform_lib.types import ElasticAction
 from platform_lib.validation import is_valid_json
 from platform_lib.validation.schemes import profile_info_scheme
-from celery import current_app
+from user_domain.managers import WorkspaceManager
+from user_domain.models import Workspace
 
 
 class PersonManager:
@@ -37,8 +36,9 @@ class PersonManager:
         if profile_info is None:
             profile_info = {}
 
-        if not is_valid_json(profile_info, profile_info_scheme):
-            raise InvalidJsonRequest()
+        # Todo: Validate with custom_fields
+        # if not is_valid_json(profile_info, profile_info_scheme):
+        #     raise InvalidJsonRequest()
 
         with transaction.atomic():
             if id:
@@ -88,20 +88,27 @@ class PersonManager:
             if not person_ids:
                 raise BadInputDataException("0xd2ae0ef8")
 
-            persons = Person.objects.select_for_update().filter(id__in=person_ids, workspace=workspace)
+            persons = Person.objects.prefetch_related("activities").select_for_update().filter(id__in=person_ids,
+                                                                                               workspace=workspace)
             if persons.count() != len(set(person_ids)):
                 raise BadInputDataException("0x51b4c0e2")
+
+            activity_ids = []
+            for person in persons:
+                activity_ids += list(person.activities.values_list("id", flat=True))
             persons.delete()
-        cls.__set_base_remove(workspace, person_ids)
+
+        cls.__set_base_remove(workspace, person_ids, activity_ids)
         cls.__drop_elastic_index(str(workspace.id), person_ids)
 
     @staticmethod
-    def __set_base_remove(workspace, person_ids):
+    def __set_base_remove(workspace, person_ids, activity_ids):
         template_version = workspace.config.get(
             'template_version',
             settings.DEFAULT_TEMPLATES_VERSION
         )
         MatcherAPI.set_base_remove(str(workspace.id), template_version, person_ids)
+        ActivityMatcherAPI.set_base_remove(str(workspace.id), template_version, activity_ids)
 
     @staticmethod
     @platform_lib.utils.elk_checker
@@ -110,12 +117,58 @@ class PersonManager:
             action=ElasticAction.drop, person_ids=person_ids, workspace_id=workspace_id
         )
 
+    def update(self, info: Optional[dict] = None, sample_ids: Optional[list] = None) -> Person:
+        with transaction.atomic():
+            locked_person = Person.objects.select_for_update().get(id=self.person.id)
+            if info is not None:
+                locked_person.info.update(info)
+            if sample_ids is not None:
+                locked_person.samples.add(*SampleManager.get_sample_ids(self.workspace_id, sample_ids))
+            locked_person.save()
+
+        self.person.refresh_from_db()
+
+        return self.person
+
+    def delete_person_main_sample(self):
+        with transaction.atomic():
+            self.person.samples.remove(self.person.info['main_sample_id'])
+            self.person.info['main_sample_id'] = None
+            self.person.save()
+
 
 class ProfileManager:
     def __init__(self, workspace_id: str, profile_id: str):
         self.workspace_id = workspace_id
         self.profile: Profile = Profile.objects.get(workspace_id=self.workspace_id, id=profile_id)
         self.current_groups_ids = None
+
+    @staticmethod
+    def _update_indexes(add_indexes: Iterable[str], remove_indexes: Iterable[str], workspace_id: str, profile: Profile):
+        from data_domain.managers import SampleManager
+        template_version = (
+            WorkspaceManager.get_template_version(workspace_id) or settings.DEFAULT_TEMPLATES_VERSION
+        )
+
+        sample = SampleManager.get_sample(
+            workspace_id=workspace_id,
+            sample_id=profile.info['main_sample_id'],
+        )
+        template_id = SampleManager.get_template_id(sample.meta, template_version)
+        for index_key in remove_indexes:
+            current_app.tasks['data_domain.tasks.remove_from_index'].delay(
+                index=str(index_key),
+                template_version=template_version,
+                person_ids=[str(profile.person_id)]
+            )
+
+        templates_info = [{'id': template_id, 'personId': str(profile.person_id)}]
+        for index_key in add_indexes:
+            current_app.tasks['data_domain.tasks.add_to_index'].delay(
+                index=str(index_key),
+                template_version=template_version,
+                templates_info=templates_info
+            )
 
     @staticmethod
     def _add_to_indexes(indexes: Iterable[str], workspace_id: str, profile: Profile):
@@ -154,23 +207,10 @@ class ProfileManager:
     def get_profile(self) -> Profile:
         return self.profile
 
-    def get_label_ids(self, label_ids: list) -> QuerySet:
-        labels = Label.objects.filter(workspace_id=self.workspace_id, id__in=label_ids,
-                                      type=Label.PROFILE_GROUP).values_list('id', flat=True)
-        if labels.count() != len(set(label_ids)):
-            raise BadInputDataException("0x573bkd35")
-        return labels
-
-    def get_sample_ids(self, sample_ids: list) -> QuerySet:
-        samples = Sample.objects.filter(workspace_id=self.workspace_id, id__in=sample_ids).values_list('id', flat=True)
-        if samples.count() != len(set(sample_ids)):
-            raise BadInputDataException("0x943b3c24")
-        return samples
-
     def add_samples(self, sample_ids: Optional[list]) -> Profile:
         if sample_ids is not None:
             with transaction.atomic():
-                self.profile.samples.add(*self.get_sample_ids(sample_ids=sample_ids))
+                self.profile.samples.add(*SampleManager.get_sample_ids(self.workspace_id, sample_ids))
                 self.profile.save()
         return self.profile
 
@@ -185,7 +225,7 @@ class ProfileManager:
             with transaction.atomic():
                 self.current_groups_ids = {str(pg_id) for pg_id in
                                            self.profile.profile_groups.values_list('id', flat=True)}
-                self.profile.profile_groups.add(*self.get_label_ids(label_ids=label_ids))
+                self.profile.profile_groups.add(*LabelManager.get_label_ids(self.workspace_id, label_ids))
                 self.profile.save()
 
             if self.profile.info.get('main_sample_id'):
@@ -197,7 +237,7 @@ class ProfileManager:
     def remove_labels(self, label_ids: Optional[list]) -> Profile:
         if label_ids is not None:
             with transaction.atomic():
-                self.profile.profile_groups.remove(*self.get_label_ids(label_ids=label_ids))
+                self.profile.profile_groups.remove(*LabelManager.get_label_ids(self.workspace_id, label_ids))
                 self.profile.save()
 
             self._remove_from_indexes(label_ids, self.workspace_id, [str(self.profile.person_id)])
@@ -248,25 +288,43 @@ class ProfileManager:
 
         ProfileManager._remove_from_indexes(label_ids, workspace_id, person_ids)
 
-    def update(self, info=None, label_ids: Optional[list] = None, sample_ids: Optional[list] = None) -> Profile:
+    def update(self, info: Optional[dict] = None, label_ids: Optional[list] = None,
+               sample_ids: Optional[list] = None) -> Profile:
+        avatar_id = None
+        current_groups_ids = set()
         with transaction.atomic():
             locked_profile = Profile.objects.select_for_update().get(id=self.profile.id)
             if info is not None:
+                if avatar_id := info.get('avatar_id'):
+                    info['main_sample_id'] = str(avatar_id)
+                    locked_profile.samples.add(avatar_id)
+
                 locked_profile.info.update(info)
             if label_ids is not None:
                 current_groups_ids = {str(pg_id) for pg_id
                                       in locked_profile.profile_groups.values_list('id', flat=True)}
-                locked_profile.profile_groups.set(self.get_label_ids(label_ids))
+                locked_profile.profile_groups.set(LabelManager.get_label_ids(self.workspace_id, label_ids))
             if sample_ids is not None:
-                locked_profile.samples.add(*self.get_sample_ids(sample_ids=sample_ids))
+                locked_profile.samples.add(*SampleManager.get_sample_ids(self.workspace_id, sample_ids))
             locked_profile.save()
 
-        if label_ids is not None:
-            # A set of elements that occur in one set but do not occur in both sets with update current_groups_ids set
-            current_groups_ids.symmetric_difference_update(label_ids)
+        main_sample_id = locked_profile.info.get('main_sample_id')
 
-            self._remove_from_indexes(current_groups_ids, self.workspace_id, [str(self.profile.person_id)])
-            self._add_to_indexes(current_groups_ids, self.workspace_id, self.profile)
+        if avatar_id is not None and label_ids is not None:
+            group_ids = current_groups_ids | {self.workspace_id}
+            self._update_indexes(
+                remove_indexes=group_ids.difference(label_ids),
+                add_indexes=set(label_ids).difference(group_ids),
+                workspace_id=self.workspace_id,
+                profile=locked_profile
+            )
+        elif label_ids is not None and main_sample_id is not None:
+            self._update_indexes(
+                add_indexes=set(label_ids).difference(current_groups_ids),
+                remove_indexes=current_groups_ids.difference(label_ids),
+                workspace_id=self.workspace_id,
+                profile=locked_profile
+            )
 
         self.profile.refresh_from_db()
 

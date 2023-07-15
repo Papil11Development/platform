@@ -1,13 +1,19 @@
+import logging
 from abc import ABC
-from celery import shared_task, Task
-from typing import List, Dict
+from typing import Dict, List
 
-from main.settings import PUBLIC_KIBANA_URL
+from celery import Task, shared_task
 from django.db.transaction import atomic
+from requests.exceptions import ConnectionError
+
+from licensing.common_managers import LicensingCommonEvent
+from main.settings import PUBLIC_KIBANA_URL
+from platform_lib.exceptions import KibanaError
 from user_domain.api.utils import create_space_elk
+from user_domain.managers import WorkspaceManager
 from user_domain.models import Workspace
 
-from platform_lib.exceptions import KibanaError
+logger = logging.getLogger(__name__)
 
 
 class AnalyticsStatus(Task, ABC):

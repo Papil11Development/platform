@@ -1,0 +1,17 @@
+{
+    "block_config": {
+        "unit_type": "_FACE_DETECTOR_FACE_FITTER",
+        "model_path": "",
+        "capturer_config": "common_capturer_uld_fda.xml",
+        "ONNXRuntime": {
+            "library_path": "/face_sdk/lib"
+        }
+    },
+    "meta_config":{
+        "conversion_needle": "RGB",
+        "versions": {
+            "v1": {},
+            "v2": {}
+        }
+    }
+}

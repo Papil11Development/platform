@@ -1,0 +1,23 @@
+{
+    "block_config": {
+        "unit_type": "_QUALITY_LIVENESS_ANTI_SPOOFING",
+        "capturer_config": "common_capturer_uld_fda.xml",
+        "sub_block_config": {
+            "unit_type": "QUALITY_ASSESSMENT_ESTIMATOR",
+            "model_path": "",
+            "config_name": "quality_assessment.xml",
+            "sdk_path": "/face_sdk"
+        },
+        "additional_variables": {
+            "quality_threshold": 30,
+            "reject_many_faces": true
+        }
+    },    
+    "meta_config":{
+        "conversion_needle": "RGB",
+        "versions": {
+            "v1": {},
+            "v2": {}
+        }
+    }
+}

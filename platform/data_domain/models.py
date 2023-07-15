@@ -1,17 +1,19 @@
-from typing import Union
 from uuid import uuid4
 
-from django.db import models, transaction
-from django.dispatch import receiver
-from django.db.models.signals import post_delete, pre_delete
+from django.db import models
 
-from user_domain.models import Workspace
 from collector_domain.models import Camera
+from user_domain.models import Workspace
 
 bsm_indicator = "$"
 
 
 class Activity(models.Model):
+    class Type(models.IntegerChoices):
+        PROGRESS = 1
+        FINALIZED = 2
+        FAILED = 3
+
     id = models.UUIDField(primary_key=True, unique=True, default=uuid4, editable=False)
 
     workspace = models.ForeignKey(Workspace, related_name='activities', on_delete=models.CASCADE, null=False)
@@ -20,6 +22,7 @@ class Activity(models.Model):
                                null=True, blank=True)
 
     data = models.JSONField(default=dict, null=True)
+    status = models.IntegerField(choices=Type.choices, default=Type.PROGRESS)
     creation_date = models.DateTimeField(auto_now_add=True, null=True, blank=True)
     last_modified = models.DateTimeField(auto_now=True, null=True, blank=True)
 
@@ -82,34 +85,3 @@ class BlobMeta(models.Model):
 #
 #     class Meta:
 #         unique_together = ("sample", "label")
-
-
-@receiver(post_delete, sender=BlobMeta)
-def post_delete_blob_meta(sender, instance, *args, **kwargs):
-    with transaction.atomic():
-        if instance.blob:
-            instance.blob.delete()
-
-
-def delete_blobs(meta: Union[dict, list], key: str = '') -> Union[dict, list]:
-    if key.startswith(bsm_indicator):
-        try:
-            BlobMeta.objects.get(id=meta['id']).delete()
-        except (BlobMeta.DoesNotExist, TypeError) as exc:
-            print(exc)
-    elif isinstance(meta, dict):
-        return {k: delete_blobs(v, k) for k, v in meta.items()}
-    elif isinstance(meta, list):
-        return [delete_blobs(m) for m in meta]
-
-
-@receiver(pre_delete, sender=Sample)
-def pre_delete_sample(sender, instance, *args, **kwargs):
-    with transaction.atomic():
-        delete_blobs(instance.meta)
-
-
-@receiver(pre_delete, sender=Activity)
-def pre_delete_activity(sender, instance, *args, **kwargs):
-    with transaction.atomic():
-        delete_blobs(instance.data)

@@ -1,0 +1,13 @@
+{
+    "block_config": {
+        "unit_type": "FACE_DETECTOR",
+        "model_path": "/face_sdk/share/facedetectors/face.enc",
+        "ONNXRuntime": {
+            "library_path": "/face_sdk/lib"
+        },
+        "confidence_threshold": 0.5
+    },
+    "meta_config":{
+        "conversion_needle": "RGB"
+    }
+}

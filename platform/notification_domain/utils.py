@@ -1,13 +1,19 @@
 import base64
+import copy
+import logging
 from enum import Enum
+from typing import Optional, Union
 
 from django.apps import apps
 
-from platform_lib.endpoints.managers.webhookManager import WebhookManager
-from user_domain.managers import EmailManager
-from label_domain.managers import LabelManager
 from collector_domain.managers import CameraManager
+from label_domain.managers import LabelManager
 from main.settings import BASE_SITE_URL
+from platform_lib.endpoints.managers.webhookManager import WebhookManager
+from platform_lib.utils import SampleObjectsName
+from user_domain.managers import EmailManager
+
+logger = logging.getLogger(__name__)
 
 
 # Duplicate because of circular import
@@ -29,36 +35,79 @@ class NotificationMessageGenerator:
 
     @staticmethod
     def __get_presence_context(notification_info: dict):
-        profile_model = apps.get_model('person_domain', 'Profile')
         blob_model = apps.get_model('data_domain', 'BlobMeta')
+        sample_model = apps.get_model('data_domain', 'Sample')
 
-        profile = profile_model.objects.get(id=notification_info.get("profile_id"))
-        profile_blob_id = profile.info.get('avatar_id')
+        log_wrong_notification = False
 
         presence_context = {
             "notification_url": f"{BASE_SITE_URL}/notifications",
             "blobs": []
         }
 
-        if camera_id := notification_info.get("camera_id"):
-            presence_context["camera"] = CameraManager.get_camera_title(camera_id)
+        avatar_id = None
+        try:
+            sample_avatar_id = notification_info['profile']['avatar_id']
+            sample = sample_model.objects.get(id=sample_avatar_id)
+            avatar_id = sample.meta[f'objects@{SampleObjectsName.PROCESSING_CAPTURER}'][0]['$cropImage']['id']
+        except KeyError:
+            logger.error('No avatar in notification')
+            log_wrong_notification = True
+        except sample_model.DoesNotExist:
+            logger.error(f'No sample for avatar {avatar_id}')
+            log_wrong_notification = True
+        except Exception:
+            logger.error(f'No avatar in sample {sample_avatar_id}', exc_info=True)
+            log_wrong_notification = True
 
-        if pg_title := notification_info.get("profile_group_id"):
-            profile_group_title, _ = LabelManager.get_label_data(pg_title)
-            presence_context["group"] = profile_group_title
+        try:
+            face_photo_id = notification_info['activity']['face_photo_id']
+        except KeyError:
+            logger.error('No face photo in notification')
+            log_wrong_notification = True
+            face_photo_id = None
+
+        try:
+            body_photo_id = notification_info['activity']['body_photo_id']
+        except KeyError:
+            logger.error('No body photo in notification')
+            log_wrong_notification = True
+            body_photo_id = None
+
+        try:
+            camera_id = notification_info['camera']['id']
+            presence_context["camera"] = CameraManager.get_camera_title(camera_id)
+        except KeyError:
+            logger.error('No camera id in notification')
+            log_wrong_notification = True
+
+        try:
+            profile_groups_data = notification_info['matched_profile_groups']
+            presence_context["group"] = LabelManager.get_label_data(profile_groups_data[0].get('id'))[0]
+        except KeyError:
+            logger.error('No matchend profile groups in notification')
+            log_wrong_notification = True
 
         for blob_id, name in (
-                (notification_info.get("realtime_face_photo_id"), 'face'),
-                (notification_info.get("realtime_body_photo_id"), 'body'),
-                (profile_blob_id, 'avatar')
+                (face_photo_id, 'face'),
+                (body_photo_id, 'body'),
+                (avatar_id, 'avatar')
         ):
+            if not blob_id:
+                continue
+
             try:
                 blob_meta = blob_model.objects.get(id=blob_id)
-            except Exception:
+            except Exception as exc:
+                log_wrong_notification = True
+                logger.error(exc, exc_info=True)
                 continue
 
             image = base64.b64encode(blob_meta.blob.data.tobytes()).decode()
             presence_context['blobs'].append((image, name))
+
+        if log_wrong_notification:
+            logger.error(f'Wrong notification {notification_info}')
 
         return presence_context
 
@@ -77,29 +126,37 @@ class NotificationMessageGenerator:
         dict:
             Message data with information about trigger event
         """
-        notification_type = notification_info['type']
+        key_words = ['avatar_id', 'face_photo_id', 'body_photo_id']
+        mapping = {
+            'avatar_id': 'sample_link',
+            'main_sample_id': 'main_sample_link',
+            'face_photo_id': 'face_photo_link',
+            'body_photo_id': 'body_photo_link',
+            'realtime_photo': 'realtime_photo_link'
+        }
+        new_info = copy.deepcopy(notification_info)
 
-        if notification_type == 'presence':
-            profile_model = apps.get_model('person_domain', 'Profile')
-            profile = profile_model.objects.get(id=notification_info.get("profile_id"))
-            profile_group_title, profile_group_info = LabelManager.\
-                get_label_data(notification_info.get('profile_group_id'))
-            camera_title = CameraManager.get_camera_title(notification_info.get('camera_id'))
+        def recursion(element: Optional[Union[dict, list]]):
 
-            notif_info = {key: value for key, value in notification_info.items() if
-                          key not in ['realtime_face_photo_id', 'realtime_body_photo_id']}
-            notif_info['avatar_id'] = profile.info.get('avatar_id')
-            notif_info.update(
-                {
-                    'profile_group_title': profile_group_title,
-                    'profile_group_color': profile_group_info.get('color'),
-                    'camera_title': camera_title
-                }
-            )
-        else:
-            notif_info = notification_info
+            if isinstance(element, dict):
+                new_fields = {}
 
-        return notif_info
+                for key, value in element.items():
+                    if key in key_words:
+                        new_fields[mapping.get(key, key)] = f'{BASE_SITE_URL}/get-image/{value}'\
+                            if value is not None else value
+                    else:
+                        recursion(value)
+
+                element.update(new_fields)
+
+            elif isinstance(element, list):
+                for value in element:
+                    recursion(value)
+
+        recursion(new_info)
+
+        return new_info
 
     @classmethod
     def email_message_generator(cls, notification_info: dict) -> dict:
@@ -157,16 +214,16 @@ class NotificationMessageGenerator:
 
     @classmethod
     def web_interface_data_generator(cls, notification_info: dict) -> dict:
-        profile_group_title, profile_group_info = LabelManager.\
-            get_label_data(notification_info.get('profile_group_id'))
-        camera_title = CameraManager.get_camera_title(notification_info.get('camera_id'))
-        notification_info.update(
-            {
-                'profile_group_title': profile_group_title,
-                'profile_group_color': profile_group_info.get('color'),
-                'camera_title': camera_title
-            }
-        )
+        # profile_group_title, profile_group_info = LabelManager.\
+        #     get_label_data(notification_info.get('profile_group_id'))
+        # camera_title = CameraManager.get_camera_title(notification_info.get('camera_id'))
+        # notification_info.update(
+        #     {
+        #         'profile_group_title': profile_group_title,
+        #         'profile_group_color': profile_group_info.get('color'),
+        #         'camera_title': camera_title
+        #     }
+        # )
         return notification_info
 
 

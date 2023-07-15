@@ -5,7 +5,7 @@ from typing import Optional, List, Union, Tuple
 from celery import current_app
 from django.db import transaction
 from django.conf import settings
-from django.db.models import Q
+from django.db.models import Q, QuerySet
 
 from label_domain.models import Label
 from platform_lib.exceptions import BadInputDataException
@@ -36,6 +36,14 @@ class LabelManager:
             return Label.objects.get(id=label_id)
         except Label.DoesNotExist:
             return None
+
+    @staticmethod
+    def get_label_ids(workspace_id: str, label_ids: list) -> QuerySet:
+        labels = Label.objects.filter(workspace_id=workspace_id, id__in=label_ids,
+                                      type=Label.PROFILE_GROUP).values_list('id', flat=True)
+        if labels.count() != len(set(label_ids)):
+            raise BadInputDataException("0x573bkd35")
+        return labels
 
     def change_label_info(self, info: Optional[dict] = None, title: Optional[str] = None):
         with transaction.atomic():

@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+option csharp_namespace = "Antispoofing.protos";
+
+service Antispoofing
+{
+    rpc Execute (AntispoofingRequest) returns (AntispoofingResponse);
+}
+
+message AntispoofingRequest
+{
+    repeated bytes data = 1;
+}
+
+message AntispoofingResponse
+{
+    bool isReal = 1;
+    float confidence = 2;
+}

@@ -1,0 +1,17 @@
+{
+    "block_config": {
+        "unit_type": "_GENDER_ESTIMATOR",
+        "model_path": "/face_sdk/share/faceanalysis/gender_heavy.enc",
+        "ONNXRuntime": {
+            "library_path": "/face_sdk/lib"
+        }
+    },
+    "meta_config":{
+        "conversion_needle": "RGB",
+        "versions": {
+            "v1": {},
+            "v2": {}
+        }
+    },
+    "dependencies": ["face-detector-face-fitter"]
+}
